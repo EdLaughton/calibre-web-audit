@@ -6,6 +6,9 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+.venv*/
+build/
+*.egg-info/
 .DS_Store
 run.log
 *.sqlite-shm

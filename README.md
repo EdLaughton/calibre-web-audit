@@ -9,6 +9,47 @@ The repo keeps the current script as the behavioural source of truth, but restru
 - conservative mutation boundaries
 - parity-focused tests around the fragile ranking and routing rules
 
+## Installation
+
+Editable install:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -U pip setuptools wheel
+python -m pip install -e .
+```
+
+Editable install with test dependencies:
+
+```bash
+python -m pip install -e '.[dev]'
+```
+
+Quote `'.[dev]'` under `zsh` so the extras spec is not treated as a glob.
+
+Non-editable install:
+
+```bash
+python -m pip install .
+```
+
+After installation the console scripts are:
+
+```bash
+hardcover-audit --help
+hardcover-discovery --help
+hardcover-apply --help
+```
+
+You can still use the module entrypoints directly:
+
+```bash
+python3 -m hardcover_tools.cli.audit --help
+python3 -m hardcover_tools.cli.discovery --help
+python3 -m hardcover_tools.cli.apply --help
+```
+
 ## Entry Points
 
 The project exposes three workflows:
@@ -21,22 +62,6 @@ The project exposes three workflows:
 
 3. `apply`
    Reads `audit/write_plan.csv` and applies approved identifier updates, with optional Calibre title/author updates.
-
-You can run them either as Python modules:
-
-```bash
-python3 -m hardcover_tools.cli.audit --help
-python3 -m hardcover_tools.cli.discovery --help
-python3 -m hardcover_tools.cli.apply --help
-```
-
-Or through console scripts after installation:
-
-```bash
-hardcover-audit --help
-hardcover-discovery --help
-hardcover-apply --help
-```
 
 ## Required Inputs
 
@@ -62,6 +87,20 @@ Use the raw token only. Do not prefix it with `Bearer `.
 - `--author-aliases-json` for author normalization aliases
 - `--ebook-meta-command` or `--docker-ebook-meta-container` when ebook metadata extraction needs an explicit tool path/container
 
+If `ebook-meta` is unavailable, the tools still run, but metadata probing falls back to weaker EPUB/ZIP/content extraction paths. For real-library audit quality, a working `ebook-meta` on the host or in the configured Docker container is strongly preferred.
+
+## Runtime Defaults
+
+Unless you override them explicitly:
+
+- `--metadata-db` defaults to `<library-root>/metadata.db`
+- `--cache-path` defaults to `<library-root>/hardcover_cache.sqlite`
+- `--output-dir` defaults to `<library-root>/audit_output_YYYYMMDD_HHMMSS`
+- `apply --write-plan` first looks for `<library-root>/audit/write_plan.csv`, then falls back to `<library-root>/write_plan.csv`
+- `run.log` is written at the root of each output directory
+
+If an older `<library-root>/hardcover_cache.json` exists, it is detected and imported into the SQLite cache on first use.
+
 ## Outputs
 
 Each command writes a timestamped output directory by default unless you pass `--output-dir`.
@@ -84,6 +123,33 @@ Each command writes a timestamped output directory by default unless you pass `-
 - `apply/apply_log.csv`
 - `apply/summary.md`
 - `run.log`
+
+## Real-Library Workflow
+
+Recommended end-to-end flow:
+
+1. Export `HARDCOVER_TOKEN`.
+2. Run `audit` against the Calibre library root.
+3. Review `audit/summary.md`, `audit/actions.csv`, and `audit/write_plan.csv`.
+4. Optionally run `discovery` to generate shortlist/review/suppressed discovery candidates.
+5. Run `apply --dry-run` against the chosen `write_plan.csv`.
+6. Only rerun `apply` without `--dry-run` once the dry-run output looks correct.
+
+Example audit:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-audit \
+  --library-root /path/to/calibre-library
+```
+
+Example discovery:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library
+```
 
 ## Safe Apply Workflow
 
@@ -133,6 +199,15 @@ python3 -m hardcover_tools.cli.apply \
   --include-calibre-title-author
 ```
 
+Console-script equivalents:
+
+```bash
+hardcover-apply \
+  --library-root /path/to/calibre-library \
+  --write-plan /path/to/output/audit/write_plan.csv \
+  --dry-run
+```
+
 ## Identifier Conventions
 
 The canonical identifier contract is fixed.
@@ -145,52 +220,14 @@ Write-back and internal canonical names are exactly:
 
 Legacy aliases may still be accepted when reading older metadata, but new writes are normalized back to those canonical names.
 
-## Example Commands
-
-Audit:
-
-```bash
-HARDCOVER_TOKEN='your_raw_token_here' \
-python3 -m hardcover_tools.cli.audit \
-  --library-root /path/to/calibre-library
-```
-
-Discovery:
-
-```bash
-HARDCOVER_TOKEN='your_raw_token_here' \
-python3 -m hardcover_tools.cli.discovery \
-  --library-root /path/to/calibre-library
-```
-
-Apply:
-
-```bash
-python3 -m hardcover_tools.cli.apply \
-  --library-root /path/to/calibre-library \
-  --write-plan /path/to/output/audit/write_plan.csv \
-  --dry-run
-```
-
-Console script equivalents:
-
-```bash
-hardcover-audit --library-root /path/to/calibre-library
-hardcover-discovery --library-root /path/to/calibre-library
-hardcover-apply --library-root /path/to/calibre-library --write-plan /path/to/output/audit/write_plan.csv --dry-run
-```
-
 ## Testing
 
 Run the current parity-focused test set with:
 
 ```bash
-PYTHONPATH=. pytest -q
+pytest -q
 ```
 
-## Caveats And TODOs
+## Operator Docs
 
-- Core audit and discovery behavior still relies on the legacy runtime module for the heaviest matching/search/orchestration paths; the rewrite has improved structure first, not fully replaced every legacy implementation yet.
-- The current fixture `write_plan.csv` did not originally carry slug columns. The rewritten audit output now enriches the write plan with slug fields for future runs.
-- When `apply` replaces a Hardcover work id and the write plan does not include a replacement slug, it clears the stale slug rather than preserving mismatched identifier data.
-- The local SQLite `title_sort()` helper used during explicit Calibre title updates is a conservative approximation of Calibre's article-handling behavior, not a full Calibre implementation.
+For a more explicit runbook, see [`docs/operator_guide.md`](docs/operator_guide.md).
