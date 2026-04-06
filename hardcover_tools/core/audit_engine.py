@@ -3,12 +3,15 @@ from __future__ import annotations
 import os
 import sys
 
-from . import _legacy_backend as backend
 from .audit_reporting import (
     build_edition_manual_review_queue,
     build_same_id_edition_write_candidates,
 )
+from .audit_pipeline import audit_books
+from .calibre_db import load_calibre_books
 from .config import AuditCliConfig
+from .ebook_meta import EbookMetaRunner
+from .hardcover_client import HardcoverClient
 from .identifiers import extract_numeric_id
 from .output import build_audit_outputs
 from .runtime_io import TeeStream
@@ -24,8 +27,7 @@ def run_audit(config: AuditCliConfig) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
-    backend.AUTHOR_ALIAS_MAP = load_author_alias_map(config.author_aliases_json)
-    text_normalization.AUTHOR_ALIAS_MAP = dict(backend.AUTHOR_ALIAS_MAP)
+    text_normalization.AUTHOR_ALIAS_MAP = load_author_alias_map(config.author_aliases_json)
     runtime_paths = resolve_runtime_paths(
         library_root=config.library_root,
         metadata_db=config.metadata_db,
@@ -47,7 +49,7 @@ def run_audit(config: AuditCliConfig) -> int:
                 print(f"Legacy JSON cache detected: {runtime_paths.legacy_cache_json_path}")
             print(f"Writing log to: {runtime_paths.log_path}")
 
-            records = backend.load_calibre_books(runtime_paths.metadata_db, runtime_paths.library_root)
+            records = load_calibre_books(runtime_paths.metadata_db, runtime_paths.library_root)
             print(f"Loaded {len(records)} calibre records")
             if config.verbose:
                 state = "on" if config.debug_hardcover else "off"
@@ -56,7 +58,7 @@ def run_audit(config: AuditCliConfig) -> int:
                     f"(progress every {config.progress_every} books; low-level Hardcover debug={state})"
                 )
 
-            hc = backend.HardcoverClient(
+            hc = HardcoverClient(
                 token=token,
                 cache_path=runtime_paths.cache_path,
                 timeout=config.hardcover_timeout,
@@ -71,7 +73,7 @@ def run_audit(config: AuditCliConfig) -> int:
                 legacy_cache_json_path=runtime_paths.legacy_cache_json_path,
                 debug_hardcover=config.debug_hardcover,
             )
-            ebook_meta_runner = backend.EbookMetaRunner(
+            ebook_meta_runner = EbookMetaRunner(
                 library_root=runtime_paths.library_root,
                 ebook_meta_command=config.ebook_meta_command,
                 docker_container_name=config.docker_ebook_meta_container,
@@ -81,9 +83,9 @@ def run_audit(config: AuditCliConfig) -> int:
             )
 
             print("Starting main audit pass...")
-            rows = backend.audit_books(
+            rows = audit_books(
                 records,
-                hc=hc,
+                hardcover_client=hc,
                 ebook_meta_runner=ebook_meta_runner,
                 limit=config.limit,
                 verbose=config.verbose,

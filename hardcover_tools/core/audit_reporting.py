@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import asdict
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
-from .edition_selection import edition_gap_tier, is_edition_write_blocked_row
+from .edition_selection import edition_gap_tier, is_edition_write_blocked_row, normalize_edition_format
 from .identifiers import extract_numeric_id
-from .models import AuditRow
+from .models import AuditRow, Decision, EditionChoiceInfo, HardcoverBook, HardcoverEdition
 from .text_normalization import (
     canonical_author_set,
     norm,
@@ -38,6 +38,149 @@ def _preview_names(items: List[str], limit: int = 3, max_len: int = 40) -> str:
     if not cleaned:
         return "-"
     return "; ".join(cleaned)
+
+
+def log_label(text: Any, max_len: int = 60) -> str:
+    return _log_label(text, max_len=max_len)
+
+
+def preview_names(items: List[str], limit: int = 3, max_len: int = 40) -> str:
+    return _preview_names(items, limit=limit, max_len=max_len)
+
+
+def _fmt_position_value(value: Any) -> str:
+    if value in (None, ""):
+        return "?"
+    try:
+        value_f = float(value)
+    except Exception:
+        return str(value)
+    if value_f.is_integer():
+        return str(int(value_f))
+    return f"{value_f:g}"
+
+
+def _series_position_bracket(position: Any, primary_books_count: Any) -> str:
+    pos_text = _fmt_position_value(position)
+    try:
+        primary_count = int(primary_books_count or 0)
+    except Exception:
+        primary_count = 0
+    if primary_count > 0:
+        return f"[{pos_text}/{primary_count}]"
+    return f"[{pos_text}]"
+
+
+def compact_edition_marker(
+    edition: Optional[HardcoverEdition],
+    pick_score: Optional[float] = None,
+) -> str:
+    if not edition:
+        return "-"
+    edition_format = normalize_edition_format(edition.edition_format, edition.reading_format) or (
+        edition.edition_format or edition.reading_format or "-"
+    )
+    language = edition.language or "-"
+    title = _log_label(edition.title or "-", max_len=48)
+    parts = [f'edition="{title}" [{edition.id}]', f"fmt={edition_format}", f"lang={language}", f"users={edition.users_count or 0}"]
+    if pick_score is not None:
+        parts.append(f"pick={float(pick_score):.1f}")
+    return " ".join(parts)
+
+
+def compact_ranked_editions(
+    ranked: List[Tuple[Tuple[Any, ...], float, str, HardcoverEdition]],
+    limit: int = 3,
+) -> str:
+    items: List[str] = []
+    for _rank, score, _reason, edition in ranked[:limit]:
+        edition_format = normalize_edition_format(edition.edition_format, edition.reading_format) or (
+            edition.edition_format or edition.reading_format or "-"
+        )
+        items.append(
+            f'{_log_label(edition.title or "-", max_len=32)} [{edition.id}; {edition_format}; {edition.language or "-"}; {float(score):.1f}]'
+        )
+    return " | ".join(items) if items else "-"
+
+
+def compact_ranked_editions_from_choice(
+    ranked: List[Tuple[Tuple[Any, ...], float, str, HardcoverEdition]],
+    skip: int = 0,
+    limit: int = 3,
+) -> str:
+    if skip < 0:
+        skip = 0
+    return compact_ranked_editions(ranked[skip:], limit=limit) if ranked[skip:] else "-"
+
+
+def compact_book_marker(book: Optional[HardcoverBook]) -> str:
+    if not book:
+        return "-"
+    title = _log_label(smart_title(book.title or "-"), max_len=48)
+    authors = _log_label(smart_title(book.authors or "-"), max_len=40)
+    return f'"{title}" [{book.id}] by {authors}'
+
+
+def compact_suggest_fields(
+    decision: Decision,
+    suggested_book: Optional[HardcoverBook],
+    suggested_edition: Optional[HardcoverEdition],
+) -> str:
+    parts: List[str] = []
+    if decision.suggested_calibre_title:
+        parts.append(f'calibre_title="{_log_label(decision.suggested_calibre_title, max_len=56)}"')
+    if decision.suggested_calibre_authors:
+        parts.append(f'calibre_authors="{_log_label(decision.suggested_calibre_authors, max_len=48)}"')
+    book = suggested_book
+    if book and (decision.suggested_hardcover_id or decision.suggested_hardcover_edition_id):
+        parts.append(f"hc={compact_book_marker(book)}")
+    elif decision.suggested_hardcover_id:
+        parts.append(f"hc_id={decision.suggested_hardcover_id}")
+    edition = suggested_edition
+    if edition and (decision.suggested_hardcover_edition_id or decision.suggested_hardcover_id):
+        parts.append(f'edition="{_log_label(edition.title or "-", max_len=48)}" [{edition.id}]')
+    elif decision.suggested_hardcover_edition_id:
+        parts.append(f"edition_id={decision.suggested_hardcover_edition_id}")
+    return " ".join(parts)
+
+
+def fmt_bool(flag: Optional[bool]) -> str:
+    if flag is True:
+        return "yes"
+    if flag is False:
+        return "no"
+    return "-"
+
+
+def compact_missing_series_marker(
+    missing: Dict[str, Any],
+    primary_books_count: int = 0,
+    include_meta: bool = True,
+) -> str:
+    slot = _series_position_bracket(missing.get("position"), primary_books_count)
+    title = _log_label(missing.get("title") or "-")
+    book_id = int(missing.get("book_id") or 0)
+    parts = [f"{slot} {title} [{book_id}]"] if book_id else [f"{slot} {title}"]
+    canonical_id = int(missing.get("canonical_id") or 0)
+    canonical_title = _log_label(missing.get("canonical_title") or "-")
+    if canonical_id or (canonical_title and canonical_title != "-"):
+        parts.append(f'canon="{canonical_title}" [{canonical_id}]' if canonical_id else f'canon="{canonical_title}"')
+    if include_meta:
+        state = _log_label(missing.get("state") or "-")
+        parts.append(f"state={state}")
+        parts.append(f"featured={'yes' if bool(missing.get('featured')) else 'no'}")
+        details = _log_label(missing.get("details") or "-")
+        parts.append(f'details="{details}"')
+    return " ".join(parts)
+
+
+def edition_choice_summary(
+    choice: EditionChoiceInfo,
+    ranked: List[Tuple[Tuple[Any, ...], float, str, HardcoverEdition]],
+) -> Tuple[str, str]:
+    preferred_summary = compact_edition_marker(choice.chosen, choice.chosen_score) if choice.chosen else "-"
+    alternatives = compact_ranked_editions_from_choice(ranked, skip=1, limit=2)
+    return preferred_summary, alternatives
 
 
 def bucket_sort_key(row: AuditRow) -> Tuple[int, float, int]:

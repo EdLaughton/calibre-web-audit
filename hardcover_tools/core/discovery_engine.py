@@ -6,9 +6,13 @@ import sys
 from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
-from . import _legacy_backend as backend
+from .audit_pipeline import audit_books
+from .calibre_db import load_calibre_books
 from .config import DiscoveryCliConfig
+from .discovery_sources import build_missing_series_books, build_owned_author_discovery
+from .ebook_meta import EbookMetaRunner
 from .edition_selection import is_english_language_name
+from .hardcover_client import HardcoverClient
 from .language import DE_STOPWORDS, EN_STOPWORDS, ES_STOPWORDS, FR_STOPWORDS, looks_englishish_text
 from .output import build_discovery_outputs
 from .runtime_io import TeeStream
@@ -474,8 +478,7 @@ def run_discovery(config: DiscoveryCliConfig) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
-    backend.AUTHOR_ALIAS_MAP = load_author_alias_map(config.author_aliases_json)
-    text_normalization.AUTHOR_ALIAS_MAP = dict(backend.AUTHOR_ALIAS_MAP)
+    text_normalization.AUTHOR_ALIAS_MAP = load_author_alias_map(config.author_aliases_json)
     runtime_paths = resolve_runtime_paths(
         library_root=config.library_root,
         metadata_db=config.metadata_db,
@@ -497,7 +500,7 @@ def run_discovery(config: DiscoveryCliConfig) -> int:
                 print(f"Legacy JSON cache detected: {runtime_paths.legacy_cache_json_path}")
             print(f"Writing log to: {runtime_paths.log_path}")
 
-            records = backend.load_calibre_books(runtime_paths.metadata_db, runtime_paths.library_root)
+            records = load_calibre_books(runtime_paths.metadata_db, runtime_paths.library_root)
             print(f"Loaded {len(records)} calibre records")
             if config.verbose:
                 state = "on" if config.debug_hardcover else "off"
@@ -506,7 +509,7 @@ def run_discovery(config: DiscoveryCliConfig) -> int:
                     f"(progress every {config.progress_every} books; low-level Hardcover debug={state})"
                 )
 
-            hc = backend.HardcoverClient(
+            hc = HardcoverClient(
                 token=token,
                 cache_path=runtime_paths.cache_path,
                 timeout=config.hardcover_timeout,
@@ -521,7 +524,7 @@ def run_discovery(config: DiscoveryCliConfig) -> int:
                 legacy_cache_json_path=runtime_paths.legacy_cache_json_path,
                 debug_hardcover=config.debug_hardcover,
             )
-            ebook_meta_runner = backend.EbookMetaRunner(
+            ebook_meta_runner = EbookMetaRunner(
                 library_root=runtime_paths.library_root,
                 ebook_meta_command=config.ebook_meta_command,
                 docker_container_name=config.docker_ebook_meta_container,
@@ -531,18 +534,18 @@ def run_discovery(config: DiscoveryCliConfig) -> int:
             )
 
             print("Starting audit prerequisite pass...")
-            rows = backend.audit_books(
+            rows = audit_books(
                 records,
-                hc=hc,
+                hardcover_client=hc,
                 ebook_meta_runner=ebook_meta_runner,
                 limit=config.limit,
                 verbose=config.verbose,
                 progress_every=config.progress_every,
             )
             print("Starting missing-series pass...")
-            missing_series_books = legacy.build_missing_series_books(rows, hc=hc, verbose=config.verbose)
+            missing_series_books = build_missing_series_books(rows, hardcover_client=hc, verbose=config.verbose)
             print("Starting owned-author discovery pass...")
-            owned_author_discovery = legacy.build_owned_author_discovery(rows, hc=hc, verbose=config.verbose)
+            owned_author_discovery = build_owned_author_discovery(rows, hardcover_client=hc, verbose=config.verbose)
             discovery_candidates = build_discovery_candidates(missing_series_books, owned_author_discovery)
             output_paths = build_discovery_outputs(discovery_candidates, runtime_paths.output_dir)
 
