@@ -61,7 +61,7 @@ The project exposes three workflows:
    Finds missing series entries and related author books, then classifies them into shortlist/review/suppressed buckets.
 
 3. `apply`
-   Reads `audit/write_plan.csv` and applies approved identifier updates, with optional Calibre title/author updates.
+   Reads `audit/write_plan.csv` and applies approved identifier updates, with optional Calibre title/author updates and optional file-level metadata write-back.
 
 ## Required Inputs
 
@@ -167,6 +167,8 @@ Default behavior:
 - skips manual-review style rows by default
 - applies only rows marked `safe_to_apply_boolean=True`
 - updates Hardcover identifiers only
+- updates `metadata.db` only
+- does not write sidecar OPF or internal EPUB metadata unless you explicitly request it
 - does not update Calibre title/author unless you explicitly ask for it
 - uses a transaction and rolls back on failure
 
@@ -179,6 +181,28 @@ Recommended workflow:
 2. Run `apply` with `--dry-run` first.
 3. If the dry-run looks correct, rerun without `--dry-run`.
 4. Only add `--include-calibre-title-author` when you explicitly want Calibre title/author rewrites as well as identifier updates.
+5. Only add file-write flags after a dry-run and only when you want Calibre-sidecar or EPUB metadata to mirror the DB update.
+
+Supported opt-in file-write targets:
+
+- Calibre sidecar OPF files:
+  - `metadata.opf`
+  - or a single `.opf` file in the book folder when that is the only available OPF target
+- internal OPF metadata in EPUB-family files:
+  - `EPUB`
+  - `KEPUB`
+  - `OEBZIP`
+
+Unsupported formats are skipped explicitly and recorded in `apply/apply_log.csv`.
+
+Safety model for file writes:
+
+- `metadata.db` remains the primary source of truth
+- DB-only apply remains the default
+- file writes are opt-in
+- dry-run resolves and logs file targets without mutating files
+- live file writes use best-effort backup/restore, but there is no single atomic transaction spanning both `metadata.db` and multiple files
+- for real libraries, keep normal Calibre/library backups before enabling file-write modes
 
 Example dry-run:
 
@@ -214,6 +238,45 @@ Console-script equivalents:
 hardcover-apply \
   --library-root /path/to/calibre-library \
   --write-plan /path/to/output/audit/write_plan.csv \
+  --dry-run
+```
+
+Example DB + sidecar OPF apply:
+
+```bash
+hardcover-apply \
+  --library-root /path/to/calibre-library \
+  --write-plan /path/to/output/audit/write_plan.csv \
+  --write-sidecar-opf
+```
+
+Example DB + internal EPUB metadata apply:
+
+```bash
+hardcover-apply \
+  --library-root /path/to/calibre-library \
+  --write-plan /path/to/output/audit/write_plan.csv \
+  --write-epub-opf
+```
+
+Example dry-run for file metadata writes:
+
+```bash
+hardcover-apply \
+  --library-root /path/to/calibre-library \
+  --write-plan /path/to/output/audit/write_plan.csv \
+  --write-ebook-metadata \
+  --dry-run
+```
+
+Example files-only sidecar dry-run:
+
+```bash
+hardcover-apply \
+  --library-root /path/to/calibre-library \
+  --write-plan /path/to/output/audit/write_plan.csv \
+  --files-only \
+  --write-sidecar-opf \
   --dry-run
 ```
 

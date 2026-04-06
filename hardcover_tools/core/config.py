@@ -84,9 +84,15 @@ class ApplyCliConfig:
     apply_actions: Tuple[str, ...]
     include_calibre_title_author: bool
     include_identifiers_only: bool
+    write_db: bool = True
+    write_sidecar_opf: bool = False
+    write_epub_opf: bool = False
+    prefer_sidecar_opf: bool = True
 
     @classmethod
     def from_namespace(cls, namespace: argparse.Namespace) -> "ApplyCliConfig":
+        write_sidecar_opf = bool(namespace.write_sidecar_opf or namespace.write_ebook_metadata)
+        write_epub_opf = bool(namespace.write_epub_opf or namespace.write_ebook_metadata)
         return cls(
             library_root=Path(namespace.library_root),
             metadata_db=Path(namespace.metadata_db) if namespace.metadata_db else None,
@@ -104,6 +110,10 @@ class ApplyCliConfig:
             include_identifiers_only=bool(
                 namespace.include_identifiers_only or not namespace.include_calibre_title_author
             ),
+            write_db=not bool(namespace.files_only),
+            write_sidecar_opf=write_sidecar_opf,
+            write_epub_opf=write_epub_opf,
+            prefer_sidecar_opf=not bool(namespace.prefer_internal_epub_opf),
         )
 
 
@@ -199,7 +209,7 @@ def build_apply_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Simulate the selected mutations inside a transaction and roll them back after logging",
+        help="Simulate the selected metadata.db and file-write actions, log the would-apply results, and leave the library unchanged",
     )
     parser.add_argument(
         "--apply-safe-only",
@@ -224,6 +234,43 @@ def build_apply_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Apply only Hardcover identifiers. This is the default behavior.",
     )
+    write_mode_group = parser.add_mutually_exclusive_group()
+    write_mode_group.add_argument(
+        "--db-only",
+        action="store_true",
+        help="Explicitly keep apply limited to metadata.db updates. This is the default behavior.",
+    )
+    write_mode_group.add_argument(
+        "--files-only",
+        action="store_true",
+        help="Skip metadata.db mutation and only attempt the requested file metadata writes.",
+    )
+    parser.add_argument(
+        "--write-ebook-metadata",
+        action="store_true",
+        help="Enable opt-in file-level metadata writes using the preferred available target among sidecar OPF and internal EPUB OPF.",
+    )
+    parser.add_argument(
+        "--write-sidecar-opf",
+        action="store_true",
+        help="Allow opt-in writes to a Calibre sidecar metadata.opf or single available .opf file.",
+    )
+    parser.add_argument(
+        "--write-epub-opf",
+        action="store_true",
+        help="Allow opt-in writes to internal OPF metadata for EPUB-family files (EPUB/KEPUB/OEBZIP).",
+    )
+    preference_group = parser.add_mutually_exclusive_group()
+    preference_group.add_argument(
+        "--prefer-sidecar-opf",
+        action="store_true",
+        help="When multiple file metadata targets are available, prefer the sidecar OPF target. This is the default.",
+    )
+    preference_group.add_argument(
+        "--prefer-internal-epub-opf",
+        action="store_true",
+        help="When multiple file metadata targets are available, prefer the internal EPUB OPF target.",
+    )
     return parser
 
 
@@ -242,6 +289,17 @@ def parse_discovery_args(argv: Optional[Sequence[str]] = None) -> DiscoveryCliCo
 def parse_apply_args(argv: Optional[Sequence[str]] = None) -> ApplyCliConfig:
     parser = build_apply_parser()
     namespace = parser.parse_args(argv)
+    file_write_requested = bool(
+        namespace.write_ebook_metadata or namespace.write_sidecar_opf or namespace.write_epub_opf
+    )
+    if namespace.db_only and file_write_requested:
+        parser.error("--db-only cannot be combined with file metadata write flags")
+    if namespace.files_only and not file_write_requested:
+        parser.error("--files-only requires at least one file metadata write flag")
+    if namespace.prefer_internal_epub_opf and not file_write_requested:
+        parser.error("--prefer-internal-epub-opf requires file metadata writing to be enabled")
+    if namespace.prefer_sidecar_opf and not file_write_requested:
+        parser.error("--prefer-sidecar-opf requires file metadata writing to be enabled")
     return ApplyCliConfig.from_namespace(namespace)
 
 

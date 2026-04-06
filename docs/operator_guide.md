@@ -87,6 +87,7 @@ If a legacy `/path/to/calibre-library/hardcover_cache.json` exists, it is import
 4. Run `apply --dry-run` first.
 5. Only rerun `apply` without `--dry-run` after checking the dry-run output.
 6. Only add `--include-calibre-title-author` when you intentionally want Calibre title/author mutation in addition to identifier writes.
+7. Only add file-write flags when you explicitly want the library files to mirror the DB update as well.
 
 ## Example Commands
 
@@ -117,6 +118,95 @@ hardcover-apply \
   --dry-run
 ```
 
+Apply DB + sidecar OPF:
+
+```bash
+hardcover-apply \
+  --library-root /path/to/calibre-library \
+  --write-plan /path/to/output/audit/write_plan.csv \
+  --write-sidecar-opf
+```
+
+Apply DB + internal EPUB OPF:
+
+```bash
+hardcover-apply \
+  --library-root /path/to/calibre-library \
+  --write-plan /path/to/output/audit/write_plan.csv \
+  --write-epub-opf
+```
+
+Dry-run file writes without DB mutation:
+
+```bash
+hardcover-apply \
+  --library-root /path/to/calibre-library \
+  --write-plan /path/to/output/audit/write_plan.csv \
+  --files-only \
+  --write-sidecar-opf \
+  --dry-run
+```
+
+## File Metadata Write Modes
+
+Default apply behavior remains:
+
+- mutate `metadata.db` only
+- write canonical identifiers only
+- skip manual-review style rows
+- skip unsafe rows by default
+
+Opt-in file-write targets in this stage:
+
+- Calibre sidecar OPF:
+  - `metadata.opf`
+  - or a single `.opf` file in the book folder when that is the only available OPF target
+- internal OPF metadata in EPUB-family files:
+  - `EPUB`
+  - `KEPUB`
+  - `OEBZIP`
+
+Unsupported file types such as `PDF` are not rewritten. They are skipped cleanly and recorded in `apply/apply_log.csv`.
+
+Target selection rules:
+
+- `--write-sidecar-opf` enables sidecar OPF writing
+- `--write-epub-opf` enables internal EPUB OPF writing
+- `--write-ebook-metadata` enables both and chooses one target per row
+- when both are available, sidecar OPF is preferred by default
+- `--prefer-internal-epub-opf` flips that preference
+
+What gets written:
+
+- canonical identifiers only:
+  - `hardcover-id`
+  - `hardcover-slug`
+  - `hardcover-edition`
+- Calibre title/author equivalents only when `--include-calibre-title-author` is also set
+
+What does not change in this stage:
+
+- no audit/discovery behavior
+- no write-plan row inclusion rules
+- no new identifier names
+- no safe-but-fake support for MOBI/PDF/AZW3 sidecar or internal metadata rewriting
+
+## Safety Model
+
+- `metadata.db` remains the primary source of truth
+- DB mutation stays the default and safest path
+- file writes are always explicit opt-in
+- `--dry-run` resolves file targets and logs would-apply results without persisting DB or file changes
+- DB writes still use the existing transaction model
+- file writes use best-effort backup/restore and are rolled back if a later row fails during the same run
+- there is no single atomic transaction spanning `metadata.db` plus multiple on-disk files
+
+For real-library runs:
+
+1. run `apply --dry-run` first
+2. inspect `apply/apply_log.csv` for `db_write_status`, `file_write_target`, `file_write_status`, and skip reasons
+3. keep your normal library backup before enabling sidecar/EPUB write modes
+
 Apply safe actions only:
 
 ```bash
@@ -146,3 +236,5 @@ hardcover-apply \
 - `apply` restricts itself to `safe_to_apply_boolean=True` rows by default.
 - Identifier-only apply remains the default.
 - Title/author updates happen only when you explicitly request them.
+- `metadata.db`-only apply remains the default.
+- File writes are best-effort and explicit, not silent or implicit.

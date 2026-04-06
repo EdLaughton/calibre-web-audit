@@ -9,6 +9,13 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from .config import ApplyCliConfig
+from .file_metadata_writer import (
+    FileMutationSession,
+    apply_selected_file_metadata,
+    build_file_metadata_payload,
+    resolve_book_file_targets,
+    select_file_write_target,
+)
 from .identifiers import (
     HARDCOVER_EDITION,
     HARDCOVER_ID,
@@ -38,7 +45,7 @@ MANUAL_REVIEW_ACTIONS = {
     "suspected_file_mismatch",
 }
 
-ATTEMPTED_STATUSES = {"applied", "would_apply", "no_changes", "rolled_back", "error"}
+ATTEMPTED_STATUSES = {"applied", "would_apply", "no_changes", "rolled_back", "error", "skipped_file_write"}
 
 IDENTIFIER_ALIASES_BY_CANONICAL = {
     canonical: tuple(
@@ -222,6 +229,15 @@ class BookState:
     identifiers: dict[str, str]
 
 
+@dataclass(frozen=True)
+class DesiredMetadata:
+    title: str
+    authors: tuple[str, ...]
+    hardcover_id: str
+    hardcover_slug: str
+    hardcover_edition_id: str
+
+
 def load_apply_plan(path: Path) -> list[ApplyPlanRow]:
     with path.open(newline="", encoding="utf-8") as handle:
         return [ApplyPlanRow.from_csv_row(index + 1, row) for index, row in enumerate(csv.DictReader(handle))]
@@ -379,19 +395,25 @@ def _base_log_row(plan_row: ApplyPlanRow) -> dict[str, Any]:
         "new_hardcover_edition_id": plan_row.new_hardcover_edition_id,
         "reason": plan_row.reason,
         "relink_reason": plan_row.relink_reason,
+        "db_write_requested": False,
+        "db_write_status": "not_requested",
+        "db_write_reason": "metadata.db writes not enabled",
+        "db_changed_fields": "",
+        "file_write_requested": False,
+        "file_write_target": "",
+        "file_write_path": "",
+        "file_write_status": "not_requested",
+        "file_write_reason": "file metadata writes not enabled",
+        "file_changed_fields": "",
     }
 
 
-def _attempt_row_apply(
-    connection: sqlite3.Connection,
+def _resolve_desired_metadata(
     plan_row: ApplyPlanRow,
+    state: BookState,
     *,
     include_calibre_title_author: bool,
-) -> dict[str, Any]:
-    state = _fetch_book_state(connection, plan_row.calibre_book_id)
-    timestamp = _utc_timestamp()
-    changed_fields: list[str] = []
-
+) -> DesiredMetadata:
     desired_hardcover_id = _normalize_identifier_value(
         HARDCOVER_ID,
         plan_row.requested_hardcover_id or state.identifiers.get(HARDCOVER_ID, ""),
@@ -409,37 +431,60 @@ def _attempt_row_apply(
     else:
         desired_hardcover_slug = ""
 
-    if desired_hardcover_id and _upsert_identifier(
+    requested_title = (plan_row.requested_title.strip() or state.title) if include_calibre_title_author else state.title
+    requested_author_names = (
+        tuple(split_author_like_string(plan_row.requested_authors)) or tuple(state.authors)
+    ) if include_calibre_title_author else tuple(state.authors)
+    return DesiredMetadata(
+        title=requested_title,
+        authors=requested_author_names,
+        hardcover_id=desired_hardcover_id,
+        hardcover_slug=desired_hardcover_slug,
+        hardcover_edition_id=desired_hardcover_edition_id,
+    )
+
+
+def _apply_database_changes(
+    connection: sqlite3.Connection,
+    plan_row: ApplyPlanRow,
+    desired: DesiredMetadata,
+    *,
+    include_calibre_title_author: bool,
+) -> list[str]:
+    state = _fetch_book_state(connection, plan_row.calibre_book_id)
+    timestamp = _utc_timestamp()
+    changed_fields: list[str] = []
+
+    if desired.hardcover_id and _upsert_identifier(
         connection,
         plan_row.calibre_book_id,
         HARDCOVER_ID,
-        desired_hardcover_id,
+        desired.hardcover_id,
     ):
         changed_fields.append(HARDCOVER_ID)
-    if desired_hardcover_edition_id and _upsert_identifier(
+    if desired.hardcover_edition_id and _upsert_identifier(
         connection,
         plan_row.calibre_book_id,
         HARDCOVER_EDITION,
-        desired_hardcover_edition_id,
+        desired.hardcover_edition_id,
     ):
         changed_fields.append(HARDCOVER_EDITION)
     if _upsert_identifier(
         connection,
         plan_row.calibre_book_id,
         HARDCOVER_SLUG,
-        desired_hardcover_slug,
+        desired.hardcover_slug,
     ):
         changed_fields.append(HARDCOVER_SLUG)
 
     if include_calibre_title_author:
-        requested_title = plan_row.requested_title.strip()
-        if requested_title and requested_title != state.title:
+        if desired.title and desired.title != state.title:
             connection.execute(
                 "UPDATE books SET title = ? WHERE id = ?",
-                (requested_title, plan_row.calibre_book_id),
+                (desired.title, plan_row.calibre_book_id),
             )
             changed_fields.append("calibre_title")
-        requested_author_names = split_author_like_string(plan_row.requested_authors)
+        requested_author_names = list(desired.authors)
         if requested_author_names and requested_author_names != state.authors:
             book_author_sort = _update_authors_for_book(
                 connection,
@@ -454,16 +499,125 @@ def _attempt_row_apply(
 
     if changed_fields:
         _book_last_modified(connection, plan_row.calibre_book_id, timestamp)
+    return changed_fields
 
-    log_row = _base_log_row(plan_row)
-    log_row["applied_changes"] = ",".join(changed_fields)
-    log_row["resolved_new_hardcover_slug"] = desired_hardcover_slug
-    if changed_fields:
+
+def _refresh_overall_status(log_row: dict[str, Any]) -> None:
+    db_status = str(log_row.get("db_write_status") or "")
+    file_status = str(log_row.get("file_write_status") or "")
+    db_requested = bool(log_row.get("db_write_requested"))
+    file_requested = bool(log_row.get("file_write_requested"))
+
+    if "error" in {db_status, file_status}:
+        log_row["status"] = "error"
+        log_row["status_reason"] = log_row.get("file_write_reason") or log_row.get("db_write_reason") or "error"
+        return
+    if "rolled_back" in {db_status, file_status}:
+        log_row["status"] = "rolled_back"
+        log_row["status_reason"] = "transaction rolled back after a later row failed"
+        return
+    if "would_apply" in {db_status, file_status}:
+        log_row["status"] = "would_apply"
+        reasons = [reason for reason in (log_row.get("db_write_reason"), log_row.get("file_write_reason")) if reason]
+        log_row["status_reason"] = "; ".join(reasons) or "dry-run would apply changes"
+        return
+    if "applied" in {db_status, file_status}:
         log_row["status"] = "applied"
-        log_row["status_reason"] = "changes applied"
+        reasons = [reason for reason in (log_row.get("db_write_reason"), log_row.get("file_write_reason")) if reason]
+        log_row["status_reason"] = "; ".join(reasons) or "changes applied"
+        return
+    if file_requested and file_status in {"skipped_no_target", "skipped_unsupported_format"} and not db_requested:
+        log_row["status"] = "skipped_file_write"
+        log_row["status_reason"] = log_row.get("file_write_reason") or "requested file metadata target was unavailable"
+        return
+    if file_requested and file_status in {"skipped_no_target", "skipped_unsupported_format"} and db_status in {
+        "no_changes",
+        "skipped_mode",
+        "not_requested",
+    }:
+        log_row["status"] = "skipped_file_write"
+        log_row["status_reason"] = log_row.get("file_write_reason") or "requested file metadata target was unavailable"
+        return
+    log_row["status"] = "no_changes"
+    reasons = []
+    if db_requested and db_status == "no_changes":
+        reasons.append("database already matched the selected apply scope")
+    if file_requested and file_status == "no_changes":
+        reasons.append("file metadata already matched the selected apply scope")
+    log_row["status_reason"] = "; ".join(reasons) or "no changes were needed"
+
+
+def _attempt_row_apply(
+    connection: sqlite3.Connection,
+    library_root: Path,
+    plan_row: ApplyPlanRow,
+    *,
+    config: ApplyCliConfig,
+    file_session: FileMutationSession,
+) -> dict[str, Any]:
+    state = _fetch_book_state(connection, plan_row.calibre_book_id)
+    desired = _resolve_desired_metadata(
+        plan_row,
+        state,
+        include_calibre_title_author=config.include_calibre_title_author,
+    )
+    log_row = _base_log_row(plan_row)
+    log_row["resolved_new_hardcover_slug"] = desired.hardcover_slug
+
+    if config.write_db:
+        db_changed_fields = _apply_database_changes(
+            connection,
+            plan_row,
+            desired,
+            include_calibre_title_author=config.include_calibre_title_author,
+        )
+        log_row["db_write_requested"] = True
+        log_row["db_changed_fields"] = ",".join(db_changed_fields)
+        if db_changed_fields:
+            log_row["db_write_status"] = "applied"
+            log_row["db_write_reason"] = "metadata.db updated"
+        else:
+            log_row["db_write_status"] = "no_changes"
+            log_row["db_write_reason"] = "metadata.db already matched the selected apply scope"
     else:
-        log_row["status"] = "no_changes"
-        log_row["status_reason"] = "database already matched the selected apply scope"
+        log_row["db_write_requested"] = False
+        log_row["db_write_status"] = "skipped_mode"
+        log_row["db_write_reason"] = "files-only mode skipped metadata.db writes"
+
+    if config.write_sidecar_opf or config.write_epub_opf:
+        log_row["file_write_requested"] = True
+        targets = resolve_book_file_targets(connection, library_root, plan_row.calibre_book_id)
+        selection = select_file_write_target(
+            targets,
+            allow_sidecar_opf=config.write_sidecar_opf,
+            allow_epub_opf=config.write_epub_opf,
+            prefer_sidecar_opf=config.prefer_sidecar_opf,
+        )
+        payload = build_file_metadata_payload(
+            title=desired.title,
+            authors=desired.authors,
+            include_title_author=config.include_calibre_title_author,
+            hardcover_id=desired.hardcover_id,
+            hardcover_slug=desired.hardcover_slug,
+            hardcover_edition_id=desired.hardcover_edition_id,
+        )
+        file_result = apply_selected_file_metadata(
+            selection,
+            payload,
+            dry_run=config.dry_run,
+            session=file_session,
+        )
+        log_row["file_write_target"] = file_result.target_kind
+        log_row["file_write_path"] = str(file_result.target_path) if file_result.target_path else ""
+        log_row["file_write_status"] = file_result.status
+        log_row["file_write_reason"] = file_result.reason
+        log_row["file_changed_fields"] = ",".join(file_result.changed_fields)
+    else:
+        log_row["file_write_requested"] = False
+        log_row["file_write_status"] = "not_requested"
+        log_row["file_write_reason"] = "file metadata writes not enabled"
+
+    _refresh_overall_status(log_row)
     return log_row
 
 
@@ -499,6 +653,10 @@ def run_apply(config: ApplyCliConfig) -> int:
                 f"safe_only={'yes' if config.apply_safe_only else 'no'} | "
                 f"identifiers_only={'yes' if config.include_identifiers_only else 'no'} | "
                 f"include_calibre_title_author={'yes' if config.include_calibre_title_author else 'no'} | "
+                f"write_db={'yes' if config.write_db else 'no'} | "
+                f"write_sidecar_opf={'yes' if config.write_sidecar_opf else 'no'} | "
+                f"write_epub_opf={'yes' if config.write_epub_opf else 'no'} | "
+                f"prefer_sidecar_opf={'yes' if config.prefer_sidecar_opf else 'no'} | "
                 f"dry_run={'yes' if config.dry_run else 'no'}"
             )
             if config.apply_actions:
@@ -551,39 +709,63 @@ def run_apply(config: ApplyCliConfig) -> int:
             attempted_count = 0
             with _open_metadata_connection(runtime_paths.metadata_db) as connection:
                 attempted_logs: list[dict[str, Any]] = []
+                file_session = FileMutationSession()
                 try:
-                    connection.execute("BEGIN IMMEDIATE")
-                    transaction_status = "in_progress"
+                    if config.write_db:
+                        connection.execute("BEGIN IMMEDIATE")
+                        transaction_status = "in_progress"
+                    else:
+                        transaction_status = "files_only_in_progress"
                     for plan_row in limited_rows:
                         attempted_count += 1
                         attempted_log = _attempt_row_apply(
                             connection,
+                            runtime_paths.library_root,
                             plan_row,
-                            include_calibre_title_author=config.include_calibre_title_author,
+                            config=config,
+                            file_session=file_session,
                         )
                         attempted_logs.append(attempted_log)
                     if config.dry_run:
-                        connection.rollback()
+                        if config.write_db:
+                            connection.rollback()
+                        file_session.restore_all()
                         transaction_status = "rolled_back_dry_run"
                         for log_row in attempted_logs:
-                            if log_row["status"] == "applied":
-                                log_row["status"] = "would_apply"
-                                log_row["status_reason"] = "dry-run transaction rolled back after simulation"
-                            elif log_row["status"] == "no_changes":
-                                log_row["status_reason"] = "dry-run verified no changes were needed"
+                            if log_row["db_write_status"] == "applied":
+                                log_row["db_write_status"] = "would_apply"
+                                log_row["db_write_reason"] = "dry-run would update metadata.db"
+                            if log_row["file_write_status"] == "applied":
+                                log_row["file_write_status"] = "would_apply"
+                                log_row["file_write_reason"] = "dry-run would update file metadata"
+                            elif log_row["file_write_status"] == "no_changes":
+                                log_row["file_write_reason"] = "dry-run verified file metadata already matched"
+                            _refresh_overall_status(log_row)
                         apply_log_rows.extend(attempted_logs)
                     else:
-                        connection.commit()
-                        transaction_status = "committed"
+                        if config.write_db:
+                            connection.commit()
+                            transaction_status = "committed"
+                        else:
+                            transaction_status = "completed_files_only"
                         apply_log_rows.extend(attempted_logs)
                 except Exception as exc:
-                    connection.rollback()
+                    if config.write_db:
+                        connection.rollback()
+                    try:
+                        file_session.restore_all()
+                    except Exception as restore_exc:
+                        exc = RuntimeError(f"{exc}; file rollback failed: {restore_exc}")
                     transaction_status = "rolled_back_error"
                     exit_code = 1
                     for log_row in attempted_logs:
-                        if log_row["status"] == "applied":
-                            log_row["status"] = "rolled_back"
-                            log_row["status_reason"] = "transaction rolled back after a later row failed"
+                        if log_row["db_write_status"] == "applied":
+                            log_row["db_write_status"] = "rolled_back"
+                            log_row["db_write_reason"] = "metadata.db transaction rolled back after a later row failed"
+                        if log_row["file_write_status"] == "applied":
+                            log_row["file_write_status"] = "rolled_back"
+                            log_row["file_write_reason"] = "file metadata restored after a later row failed"
+                        _refresh_overall_status(log_row)
                     apply_log_rows.extend(attempted_logs)
                     failing_log = _base_log_row(
                         limited_rows[min(attempted_count - 1, len(limited_rows) - 1)]
@@ -591,8 +773,16 @@ def run_apply(config: ApplyCliConfig) -> int:
                     if failing_log is not None:
                         failing_log["status"] = "error"
                         failing_log["status_reason"] = str(exc)
+                        failing_log["db_write_requested"] = config.write_db
+                        failing_log["db_write_status"] = "error" if config.write_db else "skipped_mode"
+                        failing_log["db_write_reason"] = str(exc) if config.write_db else "files-only mode skipped metadata.db writes"
+                        failing_log["file_write_requested"] = bool(config.write_sidecar_opf or config.write_epub_opf)
+                        failing_log["file_write_status"] = "error" if failing_log["file_write_requested"] else "not_requested"
+                        failing_log["file_write_reason"] = str(exc) if failing_log["file_write_requested"] else "file metadata writes not enabled"
                         apply_log_rows.append(failing_log)
                     print(f"ERROR: apply transaction failed: {exc}", file=sys.stderr)
+                finally:
+                    file_session.cleanup()
 
             output_paths = build_apply_outputs(
                 apply_log_rows,
@@ -610,6 +800,10 @@ def run_apply(config: ApplyCliConfig) -> int:
                     "apply_safe_only": config.apply_safe_only,
                     "include_identifiers_only": config.include_identifiers_only,
                     "include_calibre_title_author": config.include_calibre_title_author,
+                    "write_db": config.write_db,
+                    "write_sidecar_opf": config.write_sidecar_opf,
+                    "write_epub_opf": config.write_epub_opf,
+                    "prefer_sidecar_opf": config.prefer_sidecar_opf,
                     "apply_actions_display": ", ".join(config.apply_actions) if config.apply_actions else "",
                     "limit_display": str(config.limit) if config.limit is not None else "",
                 },

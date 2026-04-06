@@ -324,10 +324,13 @@ def build_apply_outputs(
     write_csv(apply_dir / "apply_log.csv", list(apply_log_rows))
 
     status_counts = Counter(str(row.get("status") or "unknown") for row in apply_log_rows)
+    db_status_counts = Counter(str(row.get("db_write_status") or "unknown") for row in apply_log_rows)
+    file_status_counts = Counter(str(row.get("file_write_status") or "unknown") for row in apply_log_rows)
+    file_target_counts = Counter(str(row.get("file_write_target") or "none") for row in apply_log_rows)
     attempted_action_counts = Counter(
         str(row.get("action_type") or "unknown")
         for row in apply_log_rows
-        if str(row.get("status") or "") in {"applied", "would_apply", "no_changes", "rolled_back", "error"}
+        if str(row.get("status") or "") in {"applied", "would_apply", "no_changes", "rolled_back", "error", "skipped_file_write"}
     )
     summary_lines = [
         "# Apply summary",
@@ -344,12 +347,30 @@ def build_apply_outputs(
         f"- Safe-only filter: **{'yes' if bool(summary.get('apply_safe_only')) else 'no'}**",
         f"- Identifiers-only: **{'yes' if bool(summary.get('include_identifiers_only')) else 'no'}**",
         f"- Include calibre title/author: **{'yes' if bool(summary.get('include_calibre_title_author')) else 'no'}**",
+        f"- metadata.db writes requested: **{'yes' if bool(summary.get('write_db')) else 'no'}**",
+        f"- Sidecar OPF writes requested: **{'yes' if bool(summary.get('write_sidecar_opf')) else 'no'}**",
+        f"- Internal EPUB OPF writes requested: **{'yes' if bool(summary.get('write_epub_opf')) else 'no'}**",
+        f"- File target preference: **{'sidecar_opf' if bool(summary.get('prefer_sidecar_opf', True)) else 'epub_opf'}**",
         f"- Action filter: `{summary.get('apply_actions_display') or 'all supported safe actions'}`",
         f"- Limit: `{summary.get('limit_display') or 'none'}`",
+        "",
+        "## Safety notes",
+        "- `metadata.db` remains the primary source of truth. File writes are opt-in and do not change the default DB-only apply behavior.",
+        "- File writes use best-effort backup/restore around each modified target. They are not a single atomic cross-file transaction with `metadata.db`.",
+        "- Use `--dry-run` before any live file-write mode. Dry-run resolves file targets and logs would-apply results without persisting DB or file changes.",
         "",
         "## Row statuses",
     ]
     for label, count in sorted(status_counts.items(), key=lambda item: (-item[1], item[0])):
+        summary_lines.append(f"- {label}: **{count}**")
+    summary_lines.extend(["", "## metadata.db write statuses"])
+    for label, count in sorted(db_status_counts.items(), key=lambda item: (-item[1], item[0])):
+        summary_lines.append(f"- {label}: **{count}**")
+    summary_lines.extend(["", "## File write statuses"])
+    for label, count in sorted(file_status_counts.items(), key=lambda item: (-item[1], item[0])):
+        summary_lines.append(f"- {label}: **{count}**")
+    summary_lines.extend(["", "## File write targets"])
+    for label, count in sorted(file_target_counts.items(), key=lambda item: (-item[1], item[0])):
         summary_lines.append(f"- {label}: **{count}**")
     summary_lines.extend(["", "## Attempted actions"])
     for label, count in sorted(attempted_action_counts.items(), key=lambda item: (-item[1], item[0])):
@@ -358,7 +379,7 @@ def build_apply_outputs(
         [
             "",
             "## Files",
-            "- apply_log.csv — per-row apply decisions and mutation results",
+            "- apply_log.csv — per-row apply decisions plus separate metadata.db and file-write outcomes",
         ]
     )
     _write_summary(apply_dir / "summary.md", summary_lines)
@@ -368,7 +389,7 @@ def build_apply_outputs(
         "",
         "## Apply",
         f"- Summary: `{(apply_dir / 'summary.md').name}`",
-        f"- Apply log: `{(apply_dir / 'apply_log.csv').name}`",
+        f"- Apply log: `{(apply_dir / 'apply_log.csv').name}` — includes db_write_status, file_write_target, and file_write_status columns",
         "",
         "`run.log` remains in the root output directory for the full execution trace.",
     ]
