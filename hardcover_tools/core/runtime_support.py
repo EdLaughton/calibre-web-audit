@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from .legacy_runtime import CACHE_FILENAME, LEGACY_CACHE_FILENAME, legacy
+from .runtime_defaults import CACHE_FILENAME, LEGACY_CACHE_FILENAME
+from .runtime_io import default_output_dir, ensure_dir, find_metadata_db
 
 
 @dataclass(frozen=True)
@@ -35,11 +36,11 @@ def resolve_runtime_paths(
 ) -> RuntimePaths:
     resolved_library_root = library_root.resolve()
     explicit_metadata = metadata_db.resolve() if metadata_db else None
-    resolved_metadata_db = legacy.find_metadata_db(resolved_library_root, explicit_metadata)
-    resolved_output_dir = output_dir.resolve() if output_dir else legacy.default_output_dir(resolved_library_root)
-    legacy.ensure_dir(resolved_output_dir)
+    resolved_metadata_db = find_metadata_db(resolved_library_root, explicit_metadata)
+    resolved_output_dir = output_dir.resolve() if output_dir else default_output_dir(resolved_library_root)
+    ensure_dir(resolved_output_dir)
     resolved_cache_path = cache_path.resolve() if cache_path else (resolved_library_root / CACHE_FILENAME)
-    legacy.ensure_dir(resolved_cache_path.parent)
+    ensure_dir(resolved_cache_path.parent)
     legacy_cache_json_path = resolved_library_root / LEGACY_CACHE_FILENAME
     return RuntimePaths(
         library_root=resolved_library_root,

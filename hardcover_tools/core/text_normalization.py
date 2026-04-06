@@ -92,6 +92,8 @@ PRIMARY_AUTHOR_ROLE_INCLUDE_EXACT = {
     "writers",
 }
 
+AUTHOR_ALIAS_MAP: Dict[str, str] = {}
+
 
 def norm(value: str) -> str:
     text = value or ""
@@ -125,7 +127,8 @@ def load_author_alias_map(path: Optional[Path]) -> Dict[str, str]:
 
 def normalize_author_key(name: str, alias_map: Optional[Mapping[str, str]] = None) -> str:
     key = norm(name)
-    return dict(alias_map or {}).get(key, key)
+    aliases = AUTHOR_ALIAS_MAP if alias_map is None else dict(alias_map)
+    return aliases.get(key, key)
 
 
 def clean_title_for_matching(title: str) -> str:

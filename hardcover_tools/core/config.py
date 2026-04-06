@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence, Tuple
 
-from .legacy_runtime import (
+from .runtime_defaults import (
     DEFAULT_CACHE_TTL_HOURS,
     DEFAULT_EDITION_CACHE_TTL_HOURS,
     DEFAULT_EMPTY_CACHE_TTL_HOURS,

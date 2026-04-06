@@ -3,11 +3,17 @@ from __future__ import annotations
 import os
 import sys
 
+from . import _legacy_backend as backend
+from .audit_reporting import (
+    build_edition_manual_review_queue,
+    build_same_id_edition_write_candidates,
+)
 from .config import AuditCliConfig
 from .identifiers import extract_numeric_id
-from .legacy_runtime import legacy
 from .output import build_audit_outputs
+from .runtime_io import TeeStream
 from .runtime_support import resolve_runtime_paths, validate_hardcover_token
+from . import text_normalization
 from .text_normalization import load_author_alias_map
 
 
@@ -18,7 +24,8 @@ def run_audit(config: AuditCliConfig) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
-    legacy.AUTHOR_ALIAS_MAP = load_author_alias_map(config.author_aliases_json)
+    backend.AUTHOR_ALIAS_MAP = load_author_alias_map(config.author_aliases_json)
+    text_normalization.AUTHOR_ALIAS_MAP = dict(backend.AUTHOR_ALIAS_MAP)
     runtime_paths = resolve_runtime_paths(
         library_root=config.library_root,
         metadata_db=config.metadata_db,
@@ -29,8 +36,8 @@ def run_audit(config: AuditCliConfig) -> int:
     original_stdout = sys.stdout
     original_stderr = sys.stderr
     with runtime_paths.log_path.open("w", encoding="utf-8") as log_handle:
-        sys.stdout = legacy.TeeStream(original_stdout, log_handle)
-        sys.stderr = legacy.TeeStream(original_stderr, log_handle)
+        sys.stdout = TeeStream(original_stdout, log_handle)
+        sys.stderr = TeeStream(original_stderr, log_handle)
         try:
             print(f"Using library root: {runtime_paths.library_root}")
             print(f"Using metadata DB: {runtime_paths.metadata_db}")
@@ -40,7 +47,7 @@ def run_audit(config: AuditCliConfig) -> int:
                 print(f"Legacy JSON cache detected: {runtime_paths.legacy_cache_json_path}")
             print(f"Writing log to: {runtime_paths.log_path}")
 
-            records = legacy.load_calibre_books(runtime_paths.metadata_db, runtime_paths.library_root)
+            records = backend.load_calibre_books(runtime_paths.metadata_db, runtime_paths.library_root)
             print(f"Loaded {len(records)} calibre records")
             if config.verbose:
                 state = "on" if config.debug_hardcover else "off"
@@ -49,7 +56,7 @@ def run_audit(config: AuditCliConfig) -> int:
                     f"(progress every {config.progress_every} books; low-level Hardcover debug={state})"
                 )
 
-            hc = legacy.HardcoverClient(
+            hc = backend.HardcoverClient(
                 token=token,
                 cache_path=runtime_paths.cache_path,
                 timeout=config.hardcover_timeout,
@@ -64,7 +71,7 @@ def run_audit(config: AuditCliConfig) -> int:
                 legacy_cache_json_path=runtime_paths.legacy_cache_json_path,
                 debug_hardcover=config.debug_hardcover,
             )
-            ebook_meta_runner = legacy.EbookMetaRunner(
+            ebook_meta_runner = backend.EbookMetaRunner(
                 library_root=runtime_paths.library_root,
                 ebook_meta_command=config.ebook_meta_command,
                 docker_container_name=config.docker_ebook_meta_container,
@@ -74,7 +81,7 @@ def run_audit(config: AuditCliConfig) -> int:
             )
 
             print("Starting main audit pass...")
-            rows = legacy.audit_books(
+            rows = backend.audit_books(
                 records,
                 hc=hc,
                 ebook_meta_runner=ebook_meta_runner,
@@ -89,10 +96,10 @@ def run_audit(config: AuditCliConfig) -> int:
             )
             same_id_write_count = sum(
                 1
-                for row in legacy.build_same_id_edition_write_candidates(rows)
+                for row in build_same_id_edition_write_candidates(rows)
                 if row.get("safe_for_current_id_write_pass")
             )
-            review_queue_count = len(legacy.build_edition_manual_review_queue(rows))
+            review_queue_count = len(build_edition_manual_review_queue(rows))
             print(f"Rows with an existing stored hardcover-edition: {existing_edition_count}")
             print(f"Safe same-current-id edition write candidates: {same_id_write_count}")
             print(f"Edition manual review queue size: {review_queue_count}")

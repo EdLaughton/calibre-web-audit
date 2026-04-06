@@ -28,15 +28,27 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Set
 from xml.etree import ElementTree as ET
 
+from .runtime_defaults import (
+    CACHE_FILENAME,
+    DEFAULT_CACHE_TTL_HOURS,
+    DEFAULT_EDITION_CACHE_TTL_HOURS,
+    DEFAULT_EMPTY_CACHE_TTL_HOURS,
+    DEFAULT_PROGRESS_EVERY,
+    DEFAULT_SEARCH_CACHE_TTL_HOURS,
+    HARDCOVER_DEFAULT_USER_AGENT,
+    LEGACY_CACHE_FILENAME,
+)
+from .runtime_io import (
+    TeeStream,
+    default_output_dir,
+    default_output_dir_name,
+    ensure_dir,
+    find_metadata_db,
+    write_csv,
+    write_jsonl,
+)
+
 GRAPHQL_ENDPOINT = "https://api.hardcover.app/v1/graphql"
-HARDCOVER_DEFAULT_USER_AGENT = "hardcover-calibre-audit/2026.04 (personal library audit)"
-CACHE_FILENAME = "hardcover_cache.sqlite"
-LEGACY_CACHE_FILENAME = "hardcover_cache.json"
-DEFAULT_CACHE_TTL_HOURS = 1440.0
-DEFAULT_SEARCH_CACHE_TTL_HOURS = 720.0
-DEFAULT_EMPTY_CACHE_TTL_HOURS = 168.0
-DEFAULT_EDITION_CACHE_TTL_HOURS = 720.0
-DEFAULT_PROGRESS_EVERY = 25
 QUIET_HC_LABELS = {"book_single", "books", "book_editions", "book_editions_single", "series_books", "book_series_memberships", "editions_by_id", "author_books", "books_and_editions"}
 PREFERRED_FORMATS = ["EPUB", "KEPUB", "AZW3", "MOBI", "PDF", "TXT", "DOCX", "HTML", "HTM"]
 CONTAINER_NS = {"container": "urn:oasis:names:tc:opendocument:xmlns:container"}
@@ -1434,59 +1446,10 @@ def choose_primary_file(paths_by_format: Dict[str, str]) -> Tuple[str, str]:
     fmt = sorted(paths_by_format, key=lambda f: preferred_format_key(f))[0]
     return paths_by_format[fmt], fmt
 
-def ensure_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-
-class TeeStream:
-    def __init__(self, *streams: Any):
-        self.streams = streams
-
-    def write(self, data: str) -> int:
-        for stream in self.streams:
-            stream.write(data)
-            stream.flush()
-        return len(data)
-
-    def flush(self) -> None:
-        for stream in self.streams:
-            stream.flush()
-
-
-def default_output_dir_name() -> str:
-    return f"audit_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-
-def default_output_dir(library_root: Path) -> Path:
-    return library_root / default_output_dir_name()
-
-
-def write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
-    ensure_dir(path.parent)
-    fieldnames = sorted({k for row in rows for k in row.keys()}) if rows else []
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
-
-def write_jsonl(path: Path, rows: List[Dict[str, Any]]) -> None:
-    ensure_dir(path.parent)
-    with path.open("w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-
 def chunked(seq: List[int], size: int) -> List[List[int]]:
     if size <= 0:
         return [seq[:]]
     return [seq[i:i + size] for i in range(0, len(seq), size)]
-
-def find_metadata_db(library_root: Path, explicit_path: Optional[Path]) -> Path:
-    if explicit_path:
-        return explicit_path
-    p = library_root / "metadata.db"
-    if p.exists():
-        return p
-    raise FileNotFoundError(f"metadata.db not found at {p}")
 
 def load_calibre_books(metadata_db: Path, library_root: Path) -> List[BookRecord]:
     conn = sqlite3.connect(str(metadata_db))

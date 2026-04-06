@@ -4,18 +4,18 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Sequence
 
-from .legacy_runtime import (
+from .audit_reporting import (
     bucket_sort_key,
     build_compact_audit_actions,
     build_write_plan,
     classify_manual_review_bucket,
     filter_compact_write_plan_rows,
-    legacy,
 )
+from .runtime_io import ensure_dir, write_csv
 
 
 def _write_summary(path: Path, lines: Iterable[str]) -> None:
-    legacy.ensure_dir(path.parent)
+    ensure_dir(path.parent)
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
@@ -43,9 +43,9 @@ def _enrich_write_plan_rows(rows: Sequence[Any], write_plan: Sequence[Mapping[st
 
 
 def build_audit_outputs(rows: Sequence[Any], output_dir: Path) -> Dict[str, Path]:
-    legacy.ensure_dir(output_dir)
+    ensure_dir(output_dir)
     audit_dir = output_dir / "audit"
-    legacy.ensure_dir(audit_dir)
+    ensure_dir(audit_dir)
 
     audit_actions = build_compact_audit_actions(list(rows))
     write_plan = _enrich_write_plan_rows(
@@ -53,8 +53,8 @@ def build_audit_outputs(rows: Sequence[Any], output_dir: Path) -> Dict[str, Path
         filter_compact_write_plan_rows(build_write_plan(list(rows))),
     )
 
-    legacy.write_csv(audit_dir / "actions.csv", audit_actions)
-    legacy.write_csv(audit_dir / "write_plan.csv", write_plan)
+    write_csv(audit_dir / "actions.csv", audit_actions)
+    write_csv(audit_dir / "write_plan.csv", write_plan)
 
     action_counts = Counter(getattr(row, "recommended_action", "") for row in rows)
     tier_counts = Counter(getattr(row, "confidence_tier", "") or "unknown" for row in rows)
@@ -128,11 +128,11 @@ def build_audit_outputs(rows: Sequence[Any], output_dir: Path) -> Dict[str, Path
 
 
 def build_discovery_outputs(candidates: Sequence[Mapping[str, Any]], output_dir: Path) -> Dict[str, Path]:
-    legacy.ensure_dir(output_dir)
+    ensure_dir(output_dir)
     discovery_dir = output_dir / "discovery"
-    legacy.ensure_dir(discovery_dir)
+    ensure_dir(discovery_dir)
 
-    legacy.write_csv(discovery_dir / "candidates.csv", list(candidates))
+    write_csv(discovery_dir / "candidates.csv", list(candidates))
 
     discovery_bucket_counts = Counter(str(row.get("discovery_bucket") or "unknown") for row in candidates)
     shortlist_count = sum(1 for row in candidates if bool(row.get("eligible_for_shortlist_boolean")))
@@ -186,11 +186,11 @@ def build_apply_outputs(
     *,
     summary: Mapping[str, Any],
 ) -> Dict[str, Path]:
-    legacy.ensure_dir(output_dir)
+    ensure_dir(output_dir)
     apply_dir = output_dir / "apply"
-    legacy.ensure_dir(apply_dir)
+    ensure_dir(apply_dir)
 
-    legacy.write_csv(apply_dir / "apply_log.csv", list(apply_log_rows))
+    write_csv(apply_dir / "apply_log.csv", list(apply_log_rows))
 
     status_counts = Counter(str(row.get("status") or "unknown") for row in apply_log_rows)
     attempted_action_counts = Counter(

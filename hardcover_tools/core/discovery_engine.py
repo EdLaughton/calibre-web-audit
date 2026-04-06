@@ -6,12 +6,14 @@ import sys
 from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
+from . import _legacy_backend as backend
 from .config import DiscoveryCliConfig
 from .edition_selection import is_english_language_name
 from .language import DE_STOPWORDS, EN_STOPWORDS, ES_STOPWORDS, FR_STOPWORDS, looks_englishish_text
-from .legacy_runtime import legacy
 from .output import build_discovery_outputs
+from .runtime_io import TeeStream
 from .runtime_support import resolve_runtime_paths, validate_hardcover_token
+from . import text_normalization
 from .text_normalization import canonical_author_set, load_author_alias_map, norm
 
 DISCOVERY_SIDE_MATERIAL_HINTS = (
@@ -472,7 +474,8 @@ def run_discovery(config: DiscoveryCliConfig) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
-    legacy.AUTHOR_ALIAS_MAP = load_author_alias_map(config.author_aliases_json)
+    backend.AUTHOR_ALIAS_MAP = load_author_alias_map(config.author_aliases_json)
+    text_normalization.AUTHOR_ALIAS_MAP = dict(backend.AUTHOR_ALIAS_MAP)
     runtime_paths = resolve_runtime_paths(
         library_root=config.library_root,
         metadata_db=config.metadata_db,
@@ -483,8 +486,8 @@ def run_discovery(config: DiscoveryCliConfig) -> int:
     original_stdout = sys.stdout
     original_stderr = sys.stderr
     with runtime_paths.log_path.open("w", encoding="utf-8") as log_handle:
-        sys.stdout = legacy.TeeStream(original_stdout, log_handle)
-        sys.stderr = legacy.TeeStream(original_stderr, log_handle)
+        sys.stdout = TeeStream(original_stdout, log_handle)
+        sys.stderr = TeeStream(original_stderr, log_handle)
         try:
             print(f"Using library root: {runtime_paths.library_root}")
             print(f"Using metadata DB: {runtime_paths.metadata_db}")
@@ -494,7 +497,7 @@ def run_discovery(config: DiscoveryCliConfig) -> int:
                 print(f"Legacy JSON cache detected: {runtime_paths.legacy_cache_json_path}")
             print(f"Writing log to: {runtime_paths.log_path}")
 
-            records = legacy.load_calibre_books(runtime_paths.metadata_db, runtime_paths.library_root)
+            records = backend.load_calibre_books(runtime_paths.metadata_db, runtime_paths.library_root)
             print(f"Loaded {len(records)} calibre records")
             if config.verbose:
                 state = "on" if config.debug_hardcover else "off"
@@ -503,7 +506,7 @@ def run_discovery(config: DiscoveryCliConfig) -> int:
                     f"(progress every {config.progress_every} books; low-level Hardcover debug={state})"
                 )
 
-            hc = legacy.HardcoverClient(
+            hc = backend.HardcoverClient(
                 token=token,
                 cache_path=runtime_paths.cache_path,
                 timeout=config.hardcover_timeout,
@@ -518,7 +521,7 @@ def run_discovery(config: DiscoveryCliConfig) -> int:
                 legacy_cache_json_path=runtime_paths.legacy_cache_json_path,
                 debug_hardcover=config.debug_hardcover,
             )
-            ebook_meta_runner = legacy.EbookMetaRunner(
+            ebook_meta_runner = backend.EbookMetaRunner(
                 library_root=runtime_paths.library_root,
                 ebook_meta_command=config.ebook_meta_command,
                 docker_container_name=config.docker_ebook_meta_container,
@@ -528,7 +531,7 @@ def run_discovery(config: DiscoveryCliConfig) -> int:
             )
 
             print("Starting audit prerequisite pass...")
-            rows = legacy.audit_books(
+            rows = backend.audit_books(
                 records,
                 hc=hc,
                 ebook_meta_runner=ebook_meta_runner,

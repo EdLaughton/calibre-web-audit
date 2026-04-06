@@ -1,11 +1,11 @@
 import csv
 from collections import Counter
-from pathlib import Path
 
+from conftest import FIXTURE_ROOT
 from hardcover_tools.core.discovery_engine import annotate_discovery_candidates
 
 
-FIXTURE_PATH = Path(__file__).resolve().parents[1] / "candidates.csv"
+FIXTURE_PATH = FIXTURE_ROOT / "candidates.csv"
 
 
 def _load_fixture_rows() -> list[dict[str, str]]:

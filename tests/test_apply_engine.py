@@ -3,11 +3,11 @@ import shutil
 import sqlite3
 from pathlib import Path
 
+from conftest import FIXTURE_ROOT
 from hardcover_tools.core.apply_engine import run_apply
 from hardcover_tools.core.config import ApplyCliConfig
 
 
-FIXTURE_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_DB = FIXTURE_ROOT / "metadata.db"
 FIXTURE_WRITE_PLAN = FIXTURE_ROOT / "write_plan.csv"
 

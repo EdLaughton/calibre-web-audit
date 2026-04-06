@@ -18,6 +18,7 @@ from .identifiers import (
     extract_numeric_id,
 )
 from .output import build_apply_outputs
+from .runtime_io import TeeStream
 from .runtime_support import resolve_runtime_paths
 from .text_normalization import split_author_like_string
 
@@ -485,10 +486,8 @@ def run_apply(config: ApplyCliConfig) -> int:
     original_stderr = sys.stderr
     with runtime_paths.log_path.open("w", encoding="utf-8") as log_handle:
         try:
-            from .legacy_runtime import legacy
-
-            sys.stdout = legacy.TeeStream(original_stdout, log_handle)
-            sys.stderr = legacy.TeeStream(original_stderr, log_handle)
+            sys.stdout = TeeStream(original_stdout, log_handle)
+            sys.stderr = TeeStream(original_stderr, log_handle)
 
             print(f"Using library root: {runtime_paths.library_root}")
             print(f"Using metadata DB: {runtime_paths.metadata_db}")

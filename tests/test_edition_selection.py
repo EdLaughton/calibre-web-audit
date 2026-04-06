@@ -1,9 +1,9 @@
 from hardcover_tools.core.edition_selection import (
+    choose_preferred_edition_info,
     is_audio_edition,
     is_collectionish_edition,
     is_ebookish_edition,
 )
-from hardcover_tools.core.legacy_runtime import legacy
 from hardcover_tools.core.models import (
     BookRecord,
     EmbeddedMeta,
@@ -95,7 +95,7 @@ def test_choose_preferred_edition_prefers_english_ebook_when_available() -> None
         audio_seconds=3600,
     )
 
-    info = legacy.choose_preferred_edition_info(
+    info = choose_preferred_edition_info(
         _build_record(),
         _build_file_work(),
         EmbeddedMeta(),
@@ -142,7 +142,7 @@ def test_choose_preferred_edition_uses_english_reserve_before_blank_language_ebo
         audio_seconds=3600,
     )
 
-    info = legacy.choose_preferred_edition_info(
+    info = choose_preferred_edition_info(
         _build_record(),
         _build_file_work(),
         EmbeddedMeta(),

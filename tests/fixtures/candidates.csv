@@ -1,0 +1,5 @@
+discovery_bucket,display_book_id,display_title,display_authors,authors,owned_author_names,preferred_edition_format_normalized,preferred_edition_language,edition_candidates_considered,users_count,users_read_count,gap_kind,series_id,discovery_priority_bucket,shortlist_reason
+unowned_standalone,101,The Last Kingdom,Bernard Cornwell,Bernard Cornwell,,ebook,,2,30,12,,,shortlist_blank_language_likely_english,preferred edition has blank language but looks likely English; promoted shortlist
+unowned_standalone,102,Articles About The Dark Forest,Books LLC,Books LLC,Books LLC,ebook,,3,5,1,,,suppressed_blank_language_metadata_junk,preferred edition has blank language and metadata-junk signals; suppressed
+missing_series,103,The Dark Tower,Stephen King,Stephen King,,ebook,English,2,50,25,,77,shortlist,ok
+missing_series,104,La Torre Oscura,Stephen King,Stephen King,,ebook,,2,10,4,,77,suppressed_translated_sibling,suppressed as translated duplicate of English series sibling

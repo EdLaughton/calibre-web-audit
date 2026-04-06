@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Optional
 
+from . import _legacy_backend
 from .models import HardcoverEdition
 from .text_normalization import norm, smart_title
 
@@ -135,3 +136,6 @@ def is_collectionish_edition(edition: HardcoverEdition) -> bool:
         r"\bcontains\s+books?\b",
     ]
     return any(re.search(pattern, raw, re.I) for pattern in patterns)
+
+
+choose_preferred_edition_info = _legacy_backend.choose_preferred_edition_info
