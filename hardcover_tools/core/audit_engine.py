@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
+from .audit_insights import (
+    build_metadata_probe_rollup,
+    build_reason_family_rollups,
+    format_action_family_counts,
+)
 from .audit_reporting import (
+    build_compact_audit_actions,
     build_edition_manual_review_queue,
     build_same_id_edition_write_candidates,
 )
@@ -41,21 +48,29 @@ def run_audit(config: AuditCliConfig) -> int:
         sys.stdout = TeeStream(original_stdout, log_handle)
         sys.stderr = TeeStream(original_stderr, log_handle)
         try:
-            print(f"Using library root: {runtime_paths.library_root}")
-            print(f"Using metadata DB: {runtime_paths.metadata_db}")
-            print(f"Writing outputs to: {runtime_paths.output_dir}")
-            print(f"Using cache DB: {runtime_paths.cache_path}")
+            print("== Audit setup ==")
+            print(f"Library root: {runtime_paths.library_root}")
+            print(f"Metadata DB: {runtime_paths.metadata_db}")
+            print(f"Output dir: {runtime_paths.output_dir}")
+            print(f"Cache DB: {runtime_paths.cache_path}")
             if runtime_paths.legacy_cache_json_path.exists():
                 print(f"Legacy JSON cache detected: {runtime_paths.legacy_cache_json_path}")
-            print(f"Writing log to: {runtime_paths.log_path}")
+            print(f"Run log: {runtime_paths.log_path}")
 
             records = load_calibre_books(runtime_paths.metadata_db, runtime_paths.library_root)
-            print(f"Loaded {len(records)} calibre records")
+            print(f"Calibre records loaded: {len(records)}")
+            if config.limit is not None:
+                print(f"Audit row limit: {config.limit}")
+            state = "on" if config.debug_hardcover else "off"
             if config.verbose:
-                state = "on" if config.debug_hardcover else "off"
                 print(
-                    "Verbose audit logging enabled "
-                    f"(progress every {config.progress_every} books; low-level Hardcover debug={state})"
+                    "Log mode: verbose per-book decisions with periodic summaries "
+                    f"(every {config.progress_every} books; low-level Hardcover debug={state})"
+                )
+            else:
+                print(
+                    "Log mode: concise progress summaries only "
+                    f"(every {config.progress_every} books; use --verbose for per-book decisions; low-level Hardcover debug={state})"
                 )
 
             hc = HardcoverClient(
@@ -82,7 +97,9 @@ def run_audit(config: AuditCliConfig) -> int:
                 docker_timeout=config.ebook_meta_docker_timeout,
             )
 
-            print("Starting main audit pass...")
+            print("")
+            print("== Audit pass ==")
+            audit_started_at = time.monotonic()
             rows = audit_books(
                 records,
                 hardcover_client=hc,
@@ -90,7 +107,9 @@ def run_audit(config: AuditCliConfig) -> int:
                 limit=config.limit,
                 verbose=config.verbose,
                 progress_every=config.progress_every,
+                show_progress_summary=True,
             )
+            audit_elapsed = time.monotonic() - audit_started_at
             output_paths = build_audit_outputs(rows, runtime_paths.output_dir)
 
             existing_edition_count = sum(
@@ -102,15 +121,50 @@ def run_audit(config: AuditCliConfig) -> int:
                 if row.get("safe_for_current_id_write_pass")
             )
             review_queue_count = len(build_edition_manual_review_queue(rows))
-            print(f"Rows with an existing stored hardcover-edition: {existing_edition_count}")
-            print(f"Safe same-current-id edition write candidates: {same_id_write_count}")
-            print(f"Edition manual review queue size: {review_queue_count}")
+
+            audit_actions = build_compact_audit_actions(list(rows))
+            review_source_counts = {
+                label: sum(1 for row in audit_actions if str(row.get("review_source") or "") == label)
+                for label in ("duplicate_review", "author_normalisation_review")
+            }
+            reason_rollups = dict(build_reason_family_rollups(rows, audit_actions))
+            metadata_probe_counts, _metadata_probe_samples = build_metadata_probe_rollup(rows)
+            action_mix = format_action_family_counts(rows)
+            rate = (len(rows) / audit_elapsed) if audit_elapsed > 0 else 0.0
+
+            print("")
+            print("== Audit summary ==")
+            print(f"Audit pass complete: books={len(rows)} elapsed={audit_elapsed:.1f}s rate={rate:.2f}/s")
+            print(f"Decision mix: {action_mix}")
+            alert_bits = []
+            if reason_rollups.get("Blank-language edition guardrails", 0):
+                alert_bits.append(f"blank_lang:{reason_rollups['Blank-language edition guardrails']}")
+            if reason_rollups.get("Default-ebook gap guardrails", 0):
+                alert_bits.append(f"default_gap:{reason_rollups['Default-ebook gap guardrails']}")
+            if reason_rollups.get("Relink-block rows", 0):
+                alert_bits.append(f"relink_block:{reason_rollups['Relink-block rows']}")
+            if review_source_counts.get("duplicate_review", 0):
+                alert_bits.append(f"duplicate_review:{review_source_counts['duplicate_review']}")
+            if review_source_counts.get("author_normalisation_review", 0):
+                alert_bits.append(f"author_norm_review:{review_source_counts['author_normalisation_review']}")
+            if metadata_probe_counts:
+                alert_bits.append(f"metadata_probe:{sum(metadata_probe_counts.values())}")
+            print(f"Alerts: {', '.join(alert_bits) if alert_bits else 'none flagged'}")
+            print(
+                "Edition follow-up: "
+                f"stored_edition={existing_edition_count} "
+                f"same_id_write_candidates={same_id_write_count} "
+                f"edition_review_queue={review_queue_count}"
+            )
+            print(f"Action rows: {len(audit_actions)} | Full-library write-plan rows: {len(rows)}")
             hc.print_stats_summary()
-            print("Done.")
-            print(f"Audit summary: {output_paths['summary']}")
-            print(f"Audit operator sheet: {output_paths['actions_operator']}")
-            print(f"Audit actions: {output_paths['actions']}")
-            print(f"Audit write plan: {output_paths['write_plan']}")
+            print("")
+            print("== Next review ==")
+            print(f"Review first: {output_paths['actions_operator']}")
+            print(f"Summary: {output_paths['summary']}")
+            print(f"Forensic actions: {output_paths['actions']}")
+            print(f"Apply sheet: {output_paths['write_plan']}")
+            print(f"Run overview: {output_paths['readme']}")
             return 0
         finally:
             try:

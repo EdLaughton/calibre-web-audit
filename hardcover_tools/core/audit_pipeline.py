@@ -3,10 +3,10 @@ from __future__ import annotations
 import html
 import re
 import time
-from collections import Counter
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from .audit_insights import build_progress_line, metadata_probe_diagnostic
 from .audit_reporting import (
     compact_book_marker,
     compact_edition_marker,
@@ -82,6 +82,134 @@ from .text_normalization import (
 def vlog(verbose: bool, message: str) -> None:
     if verbose:
         print(message, flush=True)
+
+
+def _is_interesting_verbose_row(
+    decision: Decision,
+    *,
+    current_ok: Optional[bool],
+    search_beyond_current: bool,
+    metadata_probe_warning: str,
+) -> bool:
+    reason = str(decision.reason or "")
+    if decision.action != "keep_hardcover_id":
+        return True
+    if decision.confidence_tier != "high":
+        return True
+    if current_ok is not True:
+        return True
+    if search_beyond_current:
+        return True
+    if metadata_probe_warning:
+        return True
+    if reason.startswith("relink:block_"):
+        return True
+    if "preferred_edition_blank_language" in reason:
+        return True
+    if "preferred_edition_differs_from_hardcover_default_ebook_with_narrow_gap" in reason:
+        return True
+    return False
+
+
+def _guardrail_note(reason: str) -> str:
+    reason_text = str(reason or "")
+    if "preferred_edition_blank_language" in reason_text:
+        return "blank-language preferred edition blocked automatic edition write"
+    if "preferred_edition_differs_from_hardcover_default_ebook_with_narrow_gap" in reason_text:
+        return "preferred edition differs from Hardcover default ebook with a narrow score gap"
+    if reason_text.startswith("relink:block_"):
+        return reason_text
+    return ""
+
+
+def _compact_book_log_line(
+    idx: int,
+    total: int,
+    row: AuditRow,
+    *,
+    current_ok: Optional[bool],
+) -> str:
+    parts = [
+        f"[{idx}/{total}]",
+        f"action={row.recommended_action}",
+        f"tier={row.confidence_tier}",
+        f"score={row.confidence_score:.2f}",
+        f"calibre_id={row.calibre_book_id}",
+        f"format={row.file_format or '-'}",
+        f'calibre="{log_label(row.calibre_title, max_len=56)}"',
+        f'file="{log_label(row.file_work_title or "-", max_len=48)}"',
+    ]
+    if row.suggested_hardcover_id or row.calibre_hardcover_id:
+        parts.append(f"hc={row.suggested_hardcover_id or row.calibre_hardcover_id}")
+    if row.suggested_hardcover_edition_id:
+        edition_bits = [row.suggested_hardcover_edition_id]
+        if row.suggested_hardcover_edition_format_normalized:
+            edition_bits.append(row.suggested_hardcover_edition_format_normalized)
+        if row.suggested_hardcover_edition_language:
+            edition_bits.append(row.suggested_hardcover_edition_language)
+        parts.append(f"edition={'/'.join(edition_bits)}")
+    parts.append(f"verified={fmt_bool(current_ok)}")
+    if row.matched_by:
+        parts.append(f"why={row.matched_by}")
+    return " ".join(parts)
+
+
+def _build_verbose_detail_lines(
+    row: AuditRow,
+    *,
+    file_work: FileWork,
+    current_book: Optional[HardcoverBook],
+    current_score: float,
+    current_ok: Optional[bool],
+    current_why: str,
+    best_choice: EditionChoiceInfo,
+    best_book: Optional[HardcoverBook],
+    best_edition: Optional[HardcoverEdition],
+    search_beyond_current: bool,
+    search_reason: str,
+    metadata_probe_warning: str,
+    metadata_probe_details: str,
+    suggest_text: str,
+) -> List[str]:
+    lines = [
+        f'  file work="{log_label(file_work.title or "-", max_len=64)}" authors={file_work.authors or "-"} source={file_work.title_basis}/{file_work.authors_basis}'
+    ]
+    if current_book:
+        lines.append(
+            f"  current={compact_book_marker(current_book)} match={current_score:.2f} verified={fmt_bool(current_ok)} why={current_why or '-'}"
+        )
+    elif row.calibre_hardcover_id:
+        lines.append(f"  current_hardcover_id={row.calibre_hardcover_id} verified={fmt_bool(current_ok)}")
+
+    if best_edition:
+        gap_tier = (
+            edition_gap_tier(best_choice.score_gap, bool(best_choice.runner_up))
+            if best_choice.score_gap is not None
+            else "-"
+        )
+        lines.append(
+            f"  preferred={compact_edition_marker(best_edition, best_choice.chosen_score)} gap={best_choice.score_gap:.1f} {gap_tier}"
+        )
+        if best_choice.runner_up:
+            lines.append(
+                f"  runner_up={compact_edition_marker(best_choice.runner_up, best_choice.runner_up_score)}"
+            )
+    elif best_book:
+        lines.append(f"  best={compact_book_marker(best_book)}")
+
+    if search_beyond_current and search_reason:
+        lines.append(f"  search_reason={search_reason}")
+
+    guardrail_note = _guardrail_note(row.reason)
+    if guardrail_note:
+        lines.append(f"  note={guardrail_note}")
+    if metadata_probe_warning:
+        lines.append(f"  warning={metadata_probe_warning} | {metadata_probe_details}")
+
+    lines.append(f"  result reason={row.reason}")
+    if suggest_text:
+        lines.append(f"  suggest {suggest_text}")
+    return lines
 
 
 def is_searchworthy_token(query: str, current_hardcover_id: str = "") -> bool:
@@ -1024,6 +1152,7 @@ def audit_books(
     limit: Optional[int],
     verbose: bool,
     progress_every: int = 100,
+    show_progress_summary: bool = False,
 ) -> List[AuditRow]:
     rows: List[AuditRow] = []
     subset = records[:limit] if limit else records
@@ -1031,10 +1160,6 @@ def audit_books(
     audit_started_at = time.monotonic()
     audit_hardcover_start = hardcover_client.stats_snapshot()
     for idx, record in enumerate(subset, start=1):
-        vlog(
-            verbose,
-            f'[{idx}/{total}] calibre_id={record.calibre_book_id} format={record.file_format or "-"} calibre="{log_label(record.calibre_title, max_len=64)}"',
-        )
         host_path = Path(record.file_path)
         embedded = ebook_meta_runner.run(host_path)
         if not embedded.embedded_title and host_path.suffix.lower() in {".epub", ".kepub", ".oebzip"}:
@@ -1043,10 +1168,6 @@ def audit_books(
                 embedded = opf
         content = extract_content_signals(record.file_path, record.calibre_title, record.calibre_authors)
         file_work = derive_file_work(record, embedded, content)
-        vlog(
-            verbose,
-            f'  file work="{log_label(file_work.title or "-", max_len=64)}" authors={file_work.authors or "-"} source={file_work.title_basis}/{file_work.authors_basis}',
-        )
 
         current_book = None
         current_choice = EditionChoiceInfo()
@@ -1126,41 +1247,71 @@ def audit_books(
             best_choice,
             best_score,
         )
-        vlog(
-            verbose,
-            f"  RESULT action={decision.action} confidence={decision.confidence_score:.2f} tier={decision.confidence_tier} reason={decision.reason}",
+        audit_row = row_from_result(
+            record,
+            file_work,
+            embedded,
+            content,
+            current_book,
+            best_book,
+            best_choice,
+            matched_by,
+            current_ok,
+            decision,
+            best_breakdown,
         )
+        metadata_probe_warning, metadata_probe_details = metadata_probe_diagnostic(audit_row)
         suggest_text = compact_suggest_fields(decision, best_book, best_edition)
-        if suggest_text:
-            vlog(verbose, f"  SUGGEST {suggest_text}")
 
-        rows.append(
-            row_from_result(
-                record,
-                file_work,
-                embedded,
-                content,
-                current_book,
-                best_book,
-                best_choice,
-                matched_by,
-                current_ok,
-                decision,
-                best_breakdown,
+        if verbose:
+            vlog(
+                True,
+                _compact_book_log_line(
+                    idx,
+                    total,
+                    audit_row,
+                    current_ok=current_ok,
+                ),
             )
-        )
+            if _is_interesting_verbose_row(
+                decision,
+                current_ok=current_ok,
+                search_beyond_current=search_beyond_current,
+                metadata_probe_warning=metadata_probe_warning,
+            ):
+                for line in _build_verbose_detail_lines(
+                    audit_row,
+                    file_work=file_work,
+                    current_book=current_book,
+                    current_score=current_score,
+                    current_ok=current_ok,
+                    current_why=current_why,
+                    best_choice=best_choice,
+                    best_book=best_book,
+                    best_edition=best_edition,
+                    search_beyond_current=search_beyond_current,
+                    search_reason=search_reason,
+                    metadata_probe_warning=metadata_probe_warning,
+                    metadata_probe_details=metadata_probe_details,
+                    suggest_text=suggest_text,
+                ):
+                    vlog(True, line)
+
+        rows.append(audit_row)
 
         if idx % 20 == 0:
             hardcover_client.save_cache()
-        if verbose and (idx % max(1, int(progress_every)) == 0 or idx == total):
+        if (show_progress_summary or verbose) and (idx % max(1, int(progress_every)) == 0 or idx == total):
             elapsed = time.monotonic() - audit_started_at
-            rate = (idx / elapsed) if elapsed > 0 else 0.0
-            eta = ((total - idx) / rate) if rate > 0 else 0.0
-            action_counts = Counter(row.recommended_action for row in rows)
-            top_actions = ", ".join(f"{key}:{value}" for key, value in action_counts.most_common(4)) or "-"
             vlog(
                 True,
-                f"[PROGRESS] books={idx}/{total} elapsed={elapsed:.1f}s rate={rate:.2f}/s eta={eta:.1f}s actions={top_actions} hc={hardcover_client.stats_delta_text(audit_hardcover_start)}",
+                build_progress_line(
+                    rows,
+                    current=idx,
+                    total=total,
+                    elapsed_s=elapsed,
+                    hardcover_delta_text=hardcover_client.stats_delta_text(audit_hardcover_start),
+                ),
             )
 
     hardcover_client.save_cache()

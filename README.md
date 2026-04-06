@@ -147,6 +147,8 @@ hardcover-audit \
   --library-root /path/to/calibre-library
 ```
 
+Audit logging defaults to compact phase/progress summaries. Add `--verbose` for per-book decision lines, and add `--debug-hardcover` only when you need low-level Hardcover HTTP/cache chatter.
+
 Example discovery:
 
 ```bash

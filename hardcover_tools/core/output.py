@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
+from .audit_insights import (
+    build_metadata_probe_rollup,
+    build_reason_family_rollups,
+    metadata_probe_diagnostic,
+)
 from .audit_reporting import (
     bucket_sort_key,
     build_compact_audit_actions,
@@ -12,7 +17,6 @@ from .audit_reporting import (
     filter_compact_write_plan_rows,
 )
 from .runtime_io import ensure_dir, write_csv
-from .text_normalization import norm, smart_title
 
 AUDIT_OPERATOR_COLUMNS = [
     "review_source",
@@ -65,12 +69,6 @@ def _write_summary(path: Path, lines: Iterable[str]) -> None:
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
-def _row_value(row: Any, field_name: str, default: Any = "") -> Any:
-    if isinstance(row, Mapping):
-        return row.get(field_name, default)
-    return getattr(row, field_name, default)
-
-
 def _enrich_write_plan_rows(rows: Sequence[Any], write_plan: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     audit_rows_by_book_id = {
         int(getattr(row, "calibre_book_id", 0) or 0): row
@@ -94,54 +92,10 @@ def _enrich_write_plan_rows(rows: Sequence[Any], write_plan: Sequence[Mapping[st
     return enriched_rows
 
 
-def _normalized_title_text(value: Any) -> str:
-    return norm(smart_title(str(value or "")))
-
-
-def _looks_like_truncated_prefix(candidate: str, reference: str) -> bool:
-    if not candidate or not reference or candidate == reference:
-        return False
-    if len(candidate) < 5 or len(reference) < 6:
-        return False
-    if len(reference) - len(candidate) not in {1, 2}:
-        return False
-    return reference.startswith(candidate)
-
-
-def _metadata_probe_diagnostic(row: Any) -> Tuple[str, str]:
-    file_work_title = smart_title(str(_row_value(row, "file_work_title", "") or ""))
-    if not file_work_title:
-        return ("", "")
-    normalized_file_work = _normalized_title_text(file_work_title)
-    if not normalized_file_work:
-        return ("", "")
-
-    reference_fields = [
-        "calibre_title",
-        "suggested_calibre_title",
-        "current_hardcover_title",
-        "suggested_hardcover_title",
-        "hardcover_title",
-    ]
-    for field_name in reference_fields:
-        reference_title = smart_title(str(_row_value(row, field_name, "") or ""))
-        normalized_reference = _normalized_title_text(reference_title)
-        if not normalized_reference or normalized_reference == normalized_file_work:
-            continue
-        if _looks_like_truncated_prefix(normalized_file_work, normalized_reference):
-            title_basis = str(_row_value(row, "file_work_title_basis", "") or "-")
-            tool_used = str(_row_value(row, "ebook_meta_tool_used", "") or "-")
-            return (
-                "possible_file_work_title_truncation",
-                f'file_work_title="{file_work_title}" vs {field_name}="{reference_title}" source={title_basis} tool={tool_used}',
-            )
-    return ("", "")
-
-
 def _build_actions_operator_rows(audit_actions: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     output: List[Dict[str, Any]] = []
     for row in audit_actions:
-        metadata_probe_warning, metadata_probe_details = _metadata_probe_diagnostic(row)
+        metadata_probe_warning, metadata_probe_details = metadata_probe_diagnostic(row)
         operator_row = {
             "review_source": row.get("review_source", ""),
             "action_bucket": row.get("action_bucket", ""),
@@ -193,72 +147,6 @@ def _build_actions_operator_rows(audit_actions: Sequence[Mapping[str, Any]]) -> 
     return output
 
 
-def _build_reason_family_rollups(
-    rows: Sequence[Any],
-    audit_actions: Sequence[Mapping[str, Any]],
-) -> List[Tuple[str, int]]:
-    duplicate_review_rows = sum(1 for row in audit_actions if str(row.get("review_source") or "") == "duplicate_review")
-    author_normalisation_review_rows = sum(
-        1 for row in audit_actions if str(row.get("review_source") or "") == "author_normalisation_review"
-    )
-    blank_language_guardrail_rows = sum(
-        1 for row in rows if "preferred_edition_blank_language" in str(_row_value(row, "reason", "") or "")
-    )
-    default_ebook_gap_guardrail_rows = sum(
-        1
-        for row in rows
-        if "preferred_edition_differs_from_hardcover_default_ebook_with_narrow_gap"
-        in str(_row_value(row, "reason", "") or "")
-    )
-    relink_block_rows = sum(
-        1 for row in rows if str(_row_value(row, "reason", "") or "").startswith("relink:block_")
-    )
-    title_metadata_cleanup_rows = sum(
-        1
-        for row in rows
-        if str(_row_value(row, "recommended_action", "") or "") in {"safe_auto_fix", "update_calibre_metadata"}
-        and str(_row_value(row, "suggested_calibre_title", "") or "")
-        and str(_row_value(row, "suggested_calibre_title", "") or "")
-        != str(_row_value(row, "calibre_title", "") or "")
-    )
-    author_metadata_cleanup_rows = sum(
-        1
-        for row in rows
-        if str(_row_value(row, "recommended_action", "") or "") == "update_calibre_metadata"
-        and str(_row_value(row, "suggested_calibre_authors", "") or "")
-        and str(_row_value(row, "suggested_calibre_authors", "") or "")
-        != str(_row_value(row, "calibre_authors", "") or "")
-    )
-    return [
-        ("Blank-language edition guardrails", blank_language_guardrail_rows),
-        ("Default-ebook gap guardrails", default_ebook_gap_guardrail_rows),
-        ("Relink-block rows", relink_block_rows),
-        ("Duplicate-review rows", duplicate_review_rows),
-        ("Author-normalisation review rows", author_normalisation_review_rows),
-        ("Title metadata cleanup rows", title_metadata_cleanup_rows),
-        ("Author metadata cleanup rows", author_metadata_cleanup_rows),
-    ]
-
-
-def _build_metadata_probe_rollup(
-    rows: Sequence[Any],
-) -> Tuple[Counter[str], Dict[str, List[str]]]:
-    counts: Counter[str] = Counter()
-    samples: Dict[str, List[str]] = {}
-    for row in rows:
-        warning, details = _metadata_probe_diagnostic(row)
-        if not warning:
-            continue
-        counts[warning] += 1
-        samples.setdefault(warning, [])
-        if len(samples[warning]) >= 5:
-            continue
-        samples[warning].append(
-            f'calibre_id={_row_value(row, "calibre_book_id", "")} | {_row_value(row, "calibre_title", "")} | {details}'
-        )
-    return counts, samples
-
-
 def build_audit_outputs(rows: Sequence[Any], output_dir: Path) -> Dict[str, Path]:
     ensure_dir(output_dir)
     audit_dir = output_dir / "audit"
@@ -281,8 +169,8 @@ def build_audit_outputs(rows: Sequence[Any], output_dir: Path) -> Dict[str, Path
     review_source_counts = Counter(str(row.get("review_source") or "unknown") for row in audit_actions)
     safe_actions = sum(1 for row in audit_actions if bool(row.get("safe_to_apply_boolean")))
     safe_write_plan_rows = sum(1 for row in write_plan if bool(row.get("safe_to_apply_boolean")))
-    reason_family_rollups = _build_reason_family_rollups(rows, audit_actions)
-    metadata_probe_counts, metadata_probe_samples = _build_metadata_probe_rollup(rows)
+    reason_family_rollups = build_reason_family_rollups(rows, audit_actions)
+    metadata_probe_counts, metadata_probe_samples = build_metadata_probe_rollup(rows)
     top_fix = sorted(
         (row for row in rows if getattr(row, "recommended_action", "") != "keep_hardcover_id"),
         key=bucket_sort_key,

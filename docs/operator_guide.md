@@ -98,6 +98,8 @@ hardcover-audit \
   --library-root /path/to/calibre-library
 ```
 
+Default audit logging is concise and progress-oriented. Use `--verbose` when you want per-book decision lines, and reserve `--debug-hardcover` for low-level Hardcover/cache troubleshooting.
+
 Discovery:
 
 ```bash
