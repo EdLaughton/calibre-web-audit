@@ -108,6 +108,7 @@ def run_audit(config: AuditCliConfig) -> int:
             hc.print_stats_summary()
             print("Done.")
             print(f"Audit summary: {output_paths['summary']}")
+            print(f"Audit operator sheet: {output_paths['actions_operator']}")
             print(f"Audit actions: {output_paths['actions']}")
             print(f"Audit write plan: {output_paths['write_plan']}")
             return 0

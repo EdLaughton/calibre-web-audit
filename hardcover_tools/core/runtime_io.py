@@ -36,7 +36,14 @@ def default_output_dir(library_root: Path) -> Path:
 
 def write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
     ensure_dir(path.parent)
-    fieldnames = sorted({key for row in rows for key in row.keys()}) if rows else []
+    fieldnames: List[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        for key in row.keys():
+            if key in seen:
+                continue
+            seen.add(key)
+            fieldnames.append(key)
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()

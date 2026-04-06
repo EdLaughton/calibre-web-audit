@@ -80,6 +80,9 @@ If a legacy `/path/to/calibre-library/hardcover_cache.json` exists, it is import
 
 1. Run `audit`.
 2. Review `audit/summary.md`, `audit/actions.csv`, and `audit/write_plan.csv`.
+   `actions_operator.csv` is the short triage view.
+   `actions.csv` is the full forensic action/review sheet.
+   `write_plan.csv` is the full-library apply sheet and may include `keep_hardcover_id` confirmation rows plus rows that are intentionally unsafe to apply.
 3. Optionally run `discovery` and review `discovery/candidates.csv`.
 4. Run `apply --dry-run` first.
 5. Only rerun `apply` without `--dry-run` after checking the dry-run output.

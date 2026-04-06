@@ -107,6 +107,7 @@ Each command writes a timestamped output directory by default unless you pass `-
 
 ### Audit outputs
 
+- `audit/actions_operator.csv`
 - `audit/actions.csv`
 - `audit/write_plan.csv`
 - `audit/summary.md`
@@ -131,6 +132,9 @@ Recommended end-to-end flow:
 1. Export `HARDCOVER_TOKEN`.
 2. Run `audit` against the Calibre library root.
 3. Review `audit/summary.md`, `audit/actions.csv`, and `audit/write_plan.csv`.
+   `actions_operator.csv` is the compact triage sheet.
+   `actions.csv` is the full forensic non-keep/review sheet.
+   `write_plan.csv` is the full-library apply sheet and can include `keep_hardcover_id` confirmation rows as well as unsafe/manual-review rows.
 4. Optionally run `discovery` to generate shortlist/review/suppressed discovery candidates.
 5. Run `apply --dry-run` against the chosen `write_plan.csv`.
 6. Only rerun `apply` without `--dry-run` once the dry-run output looks correct.
@@ -167,6 +171,9 @@ Default behavior:
 Recommended workflow:
 
 1. Run `audit` and inspect `audit/actions.csv`, `audit/write_plan.csv`, and `audit/summary.md`.
+   Treat `actions_operator.csv` as the short review queue.
+   Treat `actions.csv` as the full forensic audit artifact.
+   Treat `write_plan.csv` as the apply sheet, and filter it using `safe_to_apply_boolean`, `safe_to_apply_reason`, and `action_type`.
 2. Run `apply` with `--dry-run` first.
 3. If the dry-run looks correct, rerun without `--dry-run`.
 4. Only add `--include-calibre-title-author` when you explicitly want Calibre title/author rewrites as well as identifier updates.
