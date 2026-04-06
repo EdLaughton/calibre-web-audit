@@ -16,7 +16,12 @@ from .audit_reporting import (
     classify_manual_review_bucket,
     filter_compact_write_plan_rows,
 )
-from .runtime_io import ensure_dir, write_csv
+from .bookshelf_export import (
+    BOOKSHELF_PUSH_LOG_COLUMNS,
+    BOOKSHELF_QUEUE_COLUMNS,
+    BookshelfIntegrationResult,
+)
+from .runtime_io import ensure_dir, write_csv, write_json
 
 AUDIT_OPERATOR_COLUMNS = [
     "review_source",
@@ -258,7 +263,12 @@ def build_audit_outputs(rows: Sequence[Any], output_dir: Path) -> Dict[str, Path
     }
 
 
-def build_discovery_outputs(candidates: Sequence[Mapping[str, Any]], output_dir: Path) -> Dict[str, Path]:
+def build_discovery_outputs(
+    candidates: Sequence[Mapping[str, Any]],
+    output_dir: Path,
+    *,
+    bookshelf_result: BookshelfIntegrationResult | None = None,
+) -> Dict[str, Path]:
     ensure_dir(output_dir)
     discovery_dir = output_dir / "discovery"
     ensure_dir(discovery_dir)
@@ -290,6 +300,50 @@ def build_discovery_outputs(candidates: Sequence[Mapping[str, Any]], output_dir:
             "- candidates.csv — unified discovery sheet for missing-series and owned-author candidates",
         ]
     )
+    output_paths: Dict[str, Path] = {
+        "root": output_dir,
+        "summary": discovery_dir / "summary.md",
+        "candidates": discovery_dir / "candidates.csv",
+        "readme": output_dir / "README.md",
+    }
+
+    if bookshelf_result is not None:
+        write_csv(
+            discovery_dir / "bookshelf_queue.csv",
+            list(bookshelf_result.queue_rows),
+            fieldnames=BOOKSHELF_QUEUE_COLUMNS,
+        )
+        write_json(discovery_dir / "bookshelf_queue.json", list(bookshelf_result.queue_rows))
+        write_csv(
+            discovery_dir / "bookshelf_push_log.csv",
+            list(bookshelf_result.push_log_rows),
+            fieldnames=BOOKSHELF_PUSH_LOG_COLUMNS,
+        )
+        _write_summary(discovery_dir / "bookshelf_summary.md", bookshelf_result.summary_lines)
+        summary_lines.extend(
+            [
+                "",
+                "## Bookshelf",
+                f"- Bookshelf queue rows: **{len(bookshelf_result.queue_rows)}**",
+                f"- Bookshelf log rows: **{len(bookshelf_result.push_log_rows)}**",
+                f"- Metadata backend: **{bookshelf_result.metadata_backend or 'not_checked'}**",
+                "- See `bookshelf_summary.md` and `bookshelf_push_log.csv` for the export/push trace.",
+                "",
+                "## Bookshelf Files",
+                "- bookshelf_queue.csv — opt-in Bookshelf queue derived from eligible discovery rows",
+                "- bookshelf_queue.json — JSON form of the Bookshelf queue",
+                "- bookshelf_push_log.csv — step-by-step Bookshelf export and push log",
+                "- bookshelf_summary.md — Bookshelf export/push summary",
+            ]
+        )
+        output_paths.update(
+            {
+                "bookshelf_queue": discovery_dir / "bookshelf_queue.csv",
+                "bookshelf_queue_json": discovery_dir / "bookshelf_queue.json",
+                "bookshelf_push_log": discovery_dir / "bookshelf_push_log.csv",
+                "bookshelf_summary": discovery_dir / "bookshelf_summary.md",
+            }
+        )
     _write_summary(discovery_dir / "summary.md", summary_lines)
 
     readme_lines = [
@@ -298,17 +352,20 @@ def build_discovery_outputs(candidates: Sequence[Mapping[str, Any]], output_dir:
         "## Discovery",
         f"- Summary: `{(discovery_dir / 'summary.md').name}`",
         f"- Candidates: `{(discovery_dir / 'candidates.csv').name}`",
-        "",
-        "`run.log` remains in the root output directory for the full execution trace.",
     ]
+    if bookshelf_result is not None:
+        readme_lines.extend(
+            [
+                f"- Bookshelf queue: `{(discovery_dir / 'bookshelf_queue.csv').name}`",
+                f"- Bookshelf queue JSON: `{(discovery_dir / 'bookshelf_queue.json').name}`",
+                f"- Bookshelf push log: `{(discovery_dir / 'bookshelf_push_log.csv').name}`",
+                f"- Bookshelf summary: `{(discovery_dir / 'bookshelf_summary.md').name}`",
+            ]
+        )
+    readme_lines.extend(["", "`run.log` remains in the root output directory for the full execution trace."])
     _write_summary(output_dir / "README.md", readme_lines)
 
-    return {
-        "root": output_dir,
-        "summary": discovery_dir / "summary.md",
-        "candidates": discovery_dir / "candidates.csv",
-        "readme": output_dir / "README.md",
-    }
+    return output_paths
 
 
 def build_apply_outputs(

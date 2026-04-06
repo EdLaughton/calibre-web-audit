@@ -7,6 +7,7 @@ from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 from .audit_pipeline import audit_books
+from .bookshelf_export import run_bookshelf_integration
 from .calibre_db import load_calibre_books
 from .config import DiscoveryCliConfig
 from .discovery_sources import build_missing_series_books, build_owned_author_discovery
@@ -547,16 +548,48 @@ def run_discovery(config: DiscoveryCliConfig) -> int:
             print("Starting owned-author discovery pass...")
             owned_author_discovery = build_owned_author_discovery(rows, hardcover_client=hc, verbose=config.verbose)
             discovery_candidates = build_discovery_candidates(missing_series_books, owned_author_discovery)
-            output_paths = build_discovery_outputs(discovery_candidates, runtime_paths.output_dir)
+            bookshelf_result = None
+            if config.export_bookshelf or config.push_bookshelf:
+                bookshelf_result = run_bookshelf_integration(
+                    discovery_candidates,
+                    hardcover_client=hc,
+                    export_bookshelf=config.export_bookshelf,
+                    push_bookshelf=config.push_bookshelf,
+                    dry_run=config.dry_run,
+                    approval_mode=config.bookshelf_approval,
+                    requested_mode=config.bookshelf_mode,
+                    bookshelf_url=config.bookshelf_url,
+                    bookshelf_api_key=config.bookshelf_api_key,
+                    bookshelf_root_folder=config.bookshelf_root_folder,
+                    bookshelf_quality_profile_id=config.bookshelf_quality_profile_id,
+                    bookshelf_metadata_profile_id=config.bookshelf_metadata_profile_id,
+                    bookshelf_trigger_search=config.bookshelf_trigger_search,
+                    verbose=config.verbose,
+                )
+            output_paths = build_discovery_outputs(
+                discovery_candidates,
+                runtime_paths.output_dir,
+                bookshelf_result=bookshelf_result,
+            )
 
             shortlist_count = sum(1 for row in discovery_candidates if _to_bool(row.get("eligible_for_shortlist_boolean")))
             print(f"Discovery rows written: {len(discovery_candidates)}")
             print(f"Shortlist-eligible discovery rows: {shortlist_count}")
             print(f"Manual-review / suppressed discovery rows: {len(discovery_candidates) - shortlist_count}")
+            if bookshelf_result is not None:
+                print(f"Bookshelf queue rows written: {len(bookshelf_result.queue_rows)}")
+                if config.push_bookshelf:
+                    print(
+                        "Bookshelf metadata backend: "
+                        f"{bookshelf_result.metadata_backend or 'not_checked'}"
+                    )
             hc.print_stats_summary()
             print("Done.")
             print(f"Discovery summary: {output_paths['summary']}")
             print(f"Discovery candidates: {output_paths['candidates']}")
+            if bookshelf_result is not None:
+                print(f"Bookshelf queue: {output_paths['bookshelf_queue']}")
+                print(f"Bookshelf push log: {output_paths['bookshelf_push_log']}")
             return 0
         finally:
             try:

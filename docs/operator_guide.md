@@ -84,6 +84,7 @@ If a legacy `/path/to/calibre-library/hardcover_cache.json` exists, it is import
    `actions.csv` is the full forensic action/review sheet.
    `write_plan.csv` is the full-library apply sheet and may include `keep_hardcover_id` confirmation rows plus rows that are intentionally unsafe to apply.
 3. Optionally run `discovery` and review `discovery/candidates.csv`.
+   If you are using the Bookshelf integration, review `discovery/bookshelf_queue.csv`, `discovery/bookshelf_push_log.csv`, and `discovery/bookshelf_summary.md`.
 4. Run `apply --dry-run` first.
 5. Only rerun `apply` without `--dry-run` after checking the dry-run output.
 6. Only add `--include-calibre-title-author` when you intentionally want Calibre title/author mutation in addition to identifier writes.
@@ -107,6 +108,73 @@ Discovery:
 HARDCOVER_TOKEN='your_raw_token_here' \
 hardcover-discovery \
   --library-root /path/to/calibre-library
+```
+
+Discovery with Bookshelf queue export only:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --export-bookshelf
+```
+
+Discovery with Bookshelf dry-run push:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --push-bookshelf \
+  --bookshelf-url http://bookshelf.local:8787 \
+  --bookshelf-api-key YOUR_BOOKSHELF_API_KEY \
+  --bookshelf-root-folder /library/books \
+  --bookshelf-quality-profile-id 1 \
+  --bookshelf-metadata-profile-id 1 \
+  --dry-run
+```
+
+Discovery with live Bookshelf push plus explicit search trigger:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --push-bookshelf \
+  --bookshelf-url http://bookshelf.local:8787 \
+  --bookshelf-api-key YOUR_BOOKSHELF_API_KEY \
+  --bookshelf-root-folder /library/books \
+  --bookshelf-quality-profile-id 1 \
+  --bookshelf-metadata-profile-id 1 \
+  --bookshelf-trigger-search
+```
+
+Discovery with a Hardcover-backed Bookshelf instance:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --push-bookshelf \
+  --bookshelf-url http://bookshelf-hardcover.local:8787 \
+  --bookshelf-api-key YOUR_BOOKSHELF_API_KEY \
+  --bookshelf-root-folder /library/books \
+  --bookshelf-quality-profile-id 1 \
+  --bookshelf-metadata-profile-id 1
+```
+
+Discovery with a non-Hardcover Bookshelf instance:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --push-bookshelf \
+  --bookshelf-url http://bookshelf-nonhardcover.local:8787 \
+  --bookshelf-api-key YOUR_BOOKSHELF_API_KEY \
+  --bookshelf-root-folder /library/books \
+  --bookshelf-quality-profile-id 1 \
+  --bookshelf-metadata-profile-id 1
 ```
 
 Apply dry-run:
@@ -238,3 +306,66 @@ hardcover-apply \
 - Title/author updates happen only when you explicitly request them.
 - `metadata.db`-only apply remains the default.
 - File writes are best-effort and explicit, not silent or implicit.
+
+## Bookshelf Integration
+
+The Bookshelf integration lives entirely on the `discovery` side. It does not change discovery ranking, shortlist/review/suppressed classification, or any `apply` semantics. It only derives a secondary export/push queue from already-classified discovery rows.
+
+Required flags for live push:
+
+- `--push-bookshelf`
+- `--bookshelf-url`
+- `--bookshelf-api-key`
+- `--bookshelf-root-folder`
+- `--bookshelf-quality-profile-id`
+- `--bookshelf-metadata-profile-id`
+
+Optional control flags:
+
+- `--export-bookshelf`
+- `--dry-run`
+- `--bookshelf-trigger-search`
+- `--bookshelf-mode book|author|auto`
+- `--bookshelf-approval shortlist-only|safe-only|all-approved`
+
+Approval model:
+
+- default `shortlist-only` exports only `eligible_for_shortlist_boolean=True` rows
+- `safe-only` is stricter and keeps only the plain `shortlist` bucket
+- `all-approved` keeps all non-suppressed discovery rows
+- suppressed rows are never exported or pushed
+
+Lookup model:
+
+1. `GET /api/v1/config/development`
+2. inspect `metadataSource`
+3. if clearly Hardcover-backed, use provider-neutral direct IDs when available:
+   - `edition:<hardcover-edition>`
+   - `work:<hardcover-id>`
+4. otherwise ignore raw Hardcover IDs and fall back to:
+   - `isbn:<isbn13>`
+   - `asin:<asin>`
+   - title + author search
+5. skip ambiguous matches and log them rather than forcing a push
+
+Add behavior:
+
+- books use the `BookResource` returned by `GET /api/v1/search`
+- authors use the `AuthorResource` returned by `GET /api/v1/search`
+- required root/profile settings are filled conservatively on top of the returned payload
+- post-add search is not automatic unless you explicitly pass `--bookshelf-trigger-search`
+- `--dry-run` performs lookup and writes queue/log files without sending add or search-trigger requests
+
+Bookshelf artifacts:
+
+- `discovery/bookshelf_queue.csv`
+- `discovery/bookshelf_queue.json`
+- `discovery/bookshelf_push_log.csv`
+- `discovery/bookshelf_summary.md`
+
+Limitations:
+
+- raw Hardcover IDs are used only when the target Bookshelf instance clearly reports a Hardcover metadata backend
+- if the target metadata backend is not clearly Hardcover-backed, lookup depends on ISBN, ASIN, or title+author search quality
+- ambiguous Bookshelf matches are skipped instead of forced
+- `book` mode is the conservative default; `author` and `auto` are broader operator choices

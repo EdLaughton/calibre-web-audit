@@ -69,7 +69,49 @@ class RuntimeCliConfig:
 
 
 AuditCliConfig = RuntimeCliConfig
-DiscoveryCliConfig = RuntimeCliConfig
+
+
+@dataclass
+class DiscoveryCliConfig(RuntimeCliConfig):
+    export_bookshelf: bool = False
+    push_bookshelf: bool = False
+    dry_run: bool = False
+    bookshelf_url: Optional[str] = None
+    bookshelf_api_key: Optional[str] = None
+    bookshelf_root_folder: Optional[str] = None
+    bookshelf_quality_profile_id: Optional[int] = None
+    bookshelf_metadata_profile_id: Optional[int] = None
+    bookshelf_trigger_search: bool = False
+    bookshelf_mode: str = "book"
+    bookshelf_approval: str = "shortlist-only"
+
+    @classmethod
+    def from_namespace(cls, namespace: argparse.Namespace) -> "DiscoveryCliConfig":
+        base = RuntimeCliConfig.from_namespace(namespace)
+        return cls(
+            **base.__dict__,
+            export_bookshelf=bool(namespace.export_bookshelf or namespace.push_bookshelf),
+            push_bookshelf=bool(namespace.push_bookshelf),
+            dry_run=bool(namespace.dry_run),
+            bookshelf_url=str(namespace.bookshelf_url).strip() if namespace.bookshelf_url else None,
+            bookshelf_api_key=str(namespace.bookshelf_api_key).strip() if namespace.bookshelf_api_key else None,
+            bookshelf_root_folder=str(namespace.bookshelf_root_folder).strip()
+            if namespace.bookshelf_root_folder
+            else None,
+            bookshelf_quality_profile_id=(
+                int(namespace.bookshelf_quality_profile_id)
+                if namespace.bookshelf_quality_profile_id is not None
+                else None
+            ),
+            bookshelf_metadata_profile_id=(
+                int(namespace.bookshelf_metadata_profile_id)
+                if namespace.bookshelf_metadata_profile_id is not None
+                else None
+            ),
+            bookshelf_trigger_search=bool(namespace.bookshelf_trigger_search),
+            bookshelf_mode=str(namespace.bookshelf_mode),
+            bookshelf_approval=str(namespace.bookshelf_approval),
+        )
 
 
 @dataclass
@@ -179,6 +221,68 @@ def build_discovery_parser() -> argparse.ArgumentParser:
         description="Discover missing series entries and books by authors already owned in Calibre",
     )
     _add_shared_runtime_args(parser)
+    parser.add_argument(
+        "--export-bookshelf",
+        action="store_true",
+        help="Write an opt-in Bookshelf queue from discovery candidates without contacting Bookshelf unless --push-bookshelf is also set.",
+    )
+    parser.add_argument(
+        "--push-bookshelf",
+        action="store_true",
+        help="Look up eligible discovery rows in Bookshelf and add them conservatively. Implies queue export.",
+    )
+    parser.add_argument(
+        "--bookshelf-url",
+        type=str,
+        default=None,
+        help="Base URL for the Bookshelf instance, for example http://bookshelf.local:8787",
+    )
+    parser.add_argument(
+        "--bookshelf-api-key",
+        type=str,
+        default=None,
+        help="Bookshelf API key passed as X-Api-Key for live push operations",
+    )
+    parser.add_argument(
+        "--bookshelf-root-folder",
+        type=str,
+        default=None,
+        help="Root folder path to include on Bookshelf add payloads",
+    )
+    parser.add_argument(
+        "--bookshelf-quality-profile-id",
+        type=int,
+        default=None,
+        help="Bookshelf quality profile ID required for add payloads",
+    )
+    parser.add_argument(
+        "--bookshelf-metadata-profile-id",
+        type=int,
+        default=None,
+        help="Bookshelf metadata profile ID required for add payloads",
+    )
+    parser.add_argument(
+        "--bookshelf-trigger-search",
+        action="store_true",
+        help="After a successful Bookshelf add, enqueue an explicit search command. Disabled by default.",
+    )
+    parser.add_argument(
+        "--bookshelf-mode",
+        choices=("book", "author", "auto"),
+        default="book",
+        help="Choose whether queued discovery rows should be added as Books, Authors, or auto-resolved. Default: book.",
+    )
+    parser.add_argument(
+        "--bookshelf-approval",
+        choices=("shortlist-only", "safe-only", "all-approved"),
+        default="shortlist-only",
+        help="Control which discovery buckets are eligible for Bookshelf export/push. Default: shortlist-only.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="For Bookshelf export/push, write queue and lookup logs without posting add or search-trigger requests.",
+    )
     return parser
 
 
@@ -283,6 +387,19 @@ def parse_audit_args(argv: Optional[Sequence[str]] = None) -> AuditCliConfig:
 def parse_discovery_args(argv: Optional[Sequence[str]] = None) -> DiscoveryCliConfig:
     parser = build_discovery_parser()
     namespace = parser.parse_args(argv)
+    if namespace.dry_run and not (namespace.export_bookshelf or namespace.push_bookshelf):
+        parser.error("--dry-run requires --export-bookshelf or --push-bookshelf")
+    if namespace.push_bookshelf:
+        required_flags = (
+            ("--bookshelf-url", namespace.bookshelf_url),
+            ("--bookshelf-api-key", namespace.bookshelf_api_key),
+            ("--bookshelf-root-folder", namespace.bookshelf_root_folder),
+            ("--bookshelf-quality-profile-id", namespace.bookshelf_quality_profile_id),
+            ("--bookshelf-metadata-profile-id", namespace.bookshelf_metadata_profile_id),
+        )
+        missing = [flag for flag, value in required_flags if value in (None, "")]
+        if missing:
+            parser.error("--push-bookshelf requires " + ", ".join(missing))
     return DiscoveryCliConfig.from_namespace(namespace)
 
 
