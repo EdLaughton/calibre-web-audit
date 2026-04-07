@@ -31,6 +31,12 @@ class DiscoveryCommandResult:
     bookshelf_queue_count: int = 0
     bookshelf_push_log_count: int = 0
     bookshelf_metadata_backend: str = ""
+    shelfmark_queue_count: int = 0
+    shelfmark_push_log_count: int = 0
+    shelfmark_release_candidate_count: int = 0
+    shelfmark_selected_release_count: int = 0
+    shelfmark_download_log_count: int = 0
+    shelfmark_request_policy_mode: str = ""
     exit_code: int = 0
 
 

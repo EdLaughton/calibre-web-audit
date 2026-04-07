@@ -22,6 +22,14 @@ from .bookshelf_export import (
     BOOKSHELF_QUEUE_COLUMNS,
     BookshelfIntegrationResult,
 )
+from .shelfmark_export import (
+    SHELFMARK_DOWNLOAD_LOG_COLUMNS,
+    SHELFMARK_PUSH_LOG_COLUMNS,
+    SHELFMARK_QUEUE_COLUMNS,
+    SHELFMARK_RELEASE_CANDIDATE_COLUMNS,
+    SHELFMARK_SELECTED_RELEASE_COLUMNS,
+    ShelfmarkIntegrationResult,
+)
 from .runtime_io import ensure_dir, write_csv, write_json
 
 AUDIT_OPERATOR_COLUMNS = [
@@ -91,6 +99,14 @@ class DiscoveryOutputPaths(CommandOutputPaths):
     bookshelf_queue_json: Path | None = None
     bookshelf_push_log: Path | None = None
     bookshelf_summary: Path | None = None
+    shelfmark_queue: Path | None = None
+    shelfmark_queue_json: Path | None = None
+    shelfmark_push_log: Path | None = None
+    shelfmark_release_candidates: Path | None = None
+    shelfmark_release_candidates_json: Path | None = None
+    shelfmark_selected_releases: Path | None = None
+    shelfmark_download_log: Path | None = None
+    shelfmark_summary: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -302,6 +318,7 @@ def build_discovery_outputs(
     output_dir: Path,
     *,
     bookshelf_result: BookshelfIntegrationResult | None = None,
+    shelfmark_result: ShelfmarkIntegrationResult | None = None,
 ) -> DiscoveryOutputPaths:
     ensure_dir(output_dir)
     discovery_dir = output_dir / "discovery"
@@ -338,6 +355,14 @@ def build_discovery_outputs(
     bookshelf_queue_json_path: Path | None = None
     bookshelf_push_log_path: Path | None = None
     bookshelf_summary_path: Path | None = None
+    shelfmark_queue_path: Path | None = None
+    shelfmark_queue_json_path: Path | None = None
+    shelfmark_push_log_path: Path | None = None
+    shelfmark_release_candidates_path: Path | None = None
+    shelfmark_release_candidates_json_path: Path | None = None
+    shelfmark_selected_releases_path: Path | None = None
+    shelfmark_download_log_path: Path | None = None
+    shelfmark_summary_path: Path | None = None
 
     if bookshelf_result is not None:
         bookshelf_queue_path = discovery_dir / "bookshelf_queue.csv"
@@ -372,6 +397,85 @@ def build_discovery_outputs(
                 "- bookshelf_summary.md — Bookshelf export/push summary",
             ]
         )
+    if shelfmark_result is not None:
+        shelfmark_summary_path = discovery_dir / "shelfmark_summary.md"
+        if shelfmark_result.request_workflow_enabled:
+            shelfmark_queue_path = discovery_dir / "shelfmark_queue.csv"
+            shelfmark_queue_json_path = discovery_dir / "shelfmark_queue.json"
+            shelfmark_push_log_path = discovery_dir / "shelfmark_push_log.csv"
+            write_csv(
+                shelfmark_queue_path,
+                list(shelfmark_result.queue_rows),
+                fieldnames=SHELFMARK_QUEUE_COLUMNS,
+            )
+            write_json(shelfmark_queue_json_path, list(shelfmark_result.queue_rows))
+            write_csv(
+                shelfmark_push_log_path,
+                list(shelfmark_result.push_log_rows),
+                fieldnames=SHELFMARK_PUSH_LOG_COLUMNS,
+            )
+        if shelfmark_result.release_workflow_enabled:
+            shelfmark_release_candidates_path = discovery_dir / "shelfmark_release_candidates.csv"
+            shelfmark_release_candidates_json_path = discovery_dir / "shelfmark_release_candidates.json"
+            shelfmark_selected_releases_path = discovery_dir / "shelfmark_selected_releases.csv"
+            shelfmark_download_log_path = discovery_dir / "shelfmark_download_log.csv"
+            write_csv(
+                shelfmark_release_candidates_path,
+                list(shelfmark_result.release_candidate_rows),
+                fieldnames=SHELFMARK_RELEASE_CANDIDATE_COLUMNS,
+            )
+            write_json(
+                shelfmark_release_candidates_json_path,
+                list(shelfmark_result.release_candidate_rows),
+            )
+            write_csv(
+                shelfmark_selected_releases_path,
+                list(shelfmark_result.selected_release_rows),
+                fieldnames=SHELFMARK_SELECTED_RELEASE_COLUMNS,
+            )
+            write_csv(
+                shelfmark_download_log_path,
+                list(shelfmark_result.download_log_rows),
+                fieldnames=SHELFMARK_DOWNLOAD_LOG_COLUMNS,
+            )
+        _write_summary(shelfmark_summary_path, shelfmark_result.summary_lines)
+        summary_lines.extend(["", "## Shelfmark"])
+        if shelfmark_result.request_workflow_enabled:
+            summary_lines.extend(
+                [
+                    f"- Shelfmark request queue rows: **{len(shelfmark_result.queue_rows)}**",
+                    f"- Shelfmark request log rows: **{len(shelfmark_result.push_log_rows)}**",
+                    f"- Requests enabled: **{'yes' if shelfmark_result.requests_enabled else 'no'}**",
+                    f"- Ebook request policy: **{shelfmark_result.request_policy_mode or 'not_checked'}**",
+                ]
+            )
+        if shelfmark_result.release_workflow_enabled:
+            summary_lines.extend(
+                [
+                    f"- Shelfmark release candidate rows: **{len(shelfmark_result.release_candidate_rows)}**",
+                    f"- Shelfmark selected release rows: **{len(shelfmark_result.selected_release_rows)}**",
+                    f"- Shelfmark download log rows: **{len(shelfmark_result.download_log_rows)}**",
+                ]
+            )
+        summary_lines.extend(["- See `shelfmark_summary.md` for the full export/push trace.", "", "## Shelfmark Files"])
+        if shelfmark_result.request_workflow_enabled:
+            summary_lines.extend(
+                [
+                    "- shelfmark_queue.csv — opt-in Shelfmark request queue derived from eligible discovery rows",
+                    "- shelfmark_queue.json — JSON form of the Shelfmark request queue",
+                    "- shelfmark_push_log.csv — step-by-step Shelfmark request export and push log",
+                ]
+            )
+        if shelfmark_result.release_workflow_enabled:
+            summary_lines.extend(
+                [
+                    "- shelfmark_release_candidates.csv — concrete Shelfmark releases with accept/reject details",
+                    "- shelfmark_release_candidates.json — JSON form of the release candidate set",
+                    "- shelfmark_selected_releases.csv — per-row selected release summary",
+                    "- shelfmark_download_log.csv — release search, selection, and queue/download trace",
+                ]
+            )
+        summary_lines.append("- shelfmark_summary.md — combined Shelfmark integration summary")
     _write_summary(discovery_dir / "summary.md", summary_lines)
 
     readme_lines = [
@@ -387,6 +491,25 @@ def build_discovery_outputs(
                 f"- Bookshelf summary: `{(discovery_dir / 'bookshelf_summary.md').name}`",
             ]
         )
+    if shelfmark_result is not None:
+        if shelfmark_result.request_workflow_enabled:
+            readme_lines.extend(
+                [
+                    f"- Shelfmark request queue: `{(discovery_dir / 'shelfmark_queue.csv').name}`",
+                    f"- Shelfmark request queue JSON: `{(discovery_dir / 'shelfmark_queue.json').name}`",
+                    f"- Shelfmark request log: `{(discovery_dir / 'shelfmark_push_log.csv').name}`",
+                ]
+            )
+        if shelfmark_result.release_workflow_enabled:
+            readme_lines.extend(
+                [
+                    f"- Shelfmark release candidates: `{(discovery_dir / 'shelfmark_release_candidates.csv').name}`",
+                    f"- Shelfmark release candidates JSON: `{(discovery_dir / 'shelfmark_release_candidates.json').name}`",
+                    f"- Shelfmark selected releases: `{(discovery_dir / 'shelfmark_selected_releases.csv').name}`",
+                    f"- Shelfmark download log: `{(discovery_dir / 'shelfmark_download_log.csv').name}`",
+                ]
+            )
+        readme_lines.append(f"- Shelfmark summary: `{(discovery_dir / 'shelfmark_summary.md').name}`")
     readme_path = _write_root_readme(output_dir, "Discovery", readme_lines)
 
     return DiscoveryOutputPaths(
@@ -398,6 +521,14 @@ def build_discovery_outputs(
         bookshelf_queue_json=bookshelf_queue_json_path,
         bookshelf_push_log=bookshelf_push_log_path,
         bookshelf_summary=bookshelf_summary_path,
+        shelfmark_queue=shelfmark_queue_path,
+        shelfmark_queue_json=shelfmark_queue_json_path,
+        shelfmark_push_log=shelfmark_push_log_path,
+        shelfmark_release_candidates=shelfmark_release_candidates_path,
+        shelfmark_release_candidates_json=shelfmark_release_candidates_json_path,
+        shelfmark_selected_releases=shelfmark_selected_releases_path,
+        shelfmark_download_log=shelfmark_download_log_path,
+        shelfmark_summary=shelfmark_summary_path,
     )
 
 

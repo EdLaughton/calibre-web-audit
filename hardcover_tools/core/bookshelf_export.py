@@ -6,6 +6,13 @@ from dataclasses import dataclass
 from typing import Any, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .bookshelf_client import BookshelfApiError, BookshelfClient
+from .discovery_export_common import (
+    discovery_row_is_export_eligible,
+    find_preferred_edition,
+    ordered_export_row,
+    row_hardcover_slug,
+    to_bool,
+)
 from .matching import author_similarity, bare_title_similarity, primary_author_overlap, title_similarity
 from .models import HardcoverBook, HardcoverEdition
 from .text_normalization import canonical_author_set, normalize_search_query_title, norm, primary_author
@@ -74,14 +81,6 @@ HARDCOVER_METADATA_HINTS = (
     "hardcover.app",
     "hardcover",
 )
-
-
-def _to_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
-
-
 @dataclass(frozen=True)
 class BookshelfIntegrationResult:
     queue_rows: list[dict[str, Any]]
@@ -143,7 +142,7 @@ def build_bookshelf_queue(
         display_book_id = str(row.get("display_book_id") or "").strip()
         preferred_edition_id = str(row.get("preferred_edition_id") or "").strip()
         book_id = int(display_book_id or 0)
-        preferred_edition = _find_preferred_edition(
+        preferred_edition = find_preferred_edition(
             editions_by_book_id.get(book_id) or [],
             preferred_edition_id=preferred_edition_id,
         )
@@ -156,7 +155,7 @@ def build_bookshelf_queue(
             "discovery_bucket": str(row.get("discovery_bucket") or ""),
             "discovery_priority_bucket": str(row.get("discovery_priority_bucket") or ""),
             "shortlist_reason": str(row.get("shortlist_reason") or approval_reason or ""),
-            "eligible_for_shortlist_boolean": _to_bool(row.get("eligible_for_shortlist_boolean")),
+            "eligible_for_shortlist_boolean": to_bool(row.get("eligible_for_shortlist_boolean")),
             "bookshelf_requested_mode": requested_mode,
             "bookshelf_target_kind": bookshelf_target_kind,
             "display_title": str(row.get("display_title") or row.get("title") or ""),
@@ -165,7 +164,7 @@ def build_bookshelf_queue(
             "owned_author_names": str(row.get("owned_author_names") or ""),
             "gap_kind": str(row.get("gap_kind") or row.get("reason") or ""),
             "hardcover-id": display_book_id,
-            "hardcover-slug": _row_hardcover_slug(row, books_by_id.get(book_id)),
+            "hardcover-slug": row_hardcover_slug(row, books_by_id.get(book_id)),
             "hardcover-edition": preferred_edition_id,
             "isbn13": preferred_edition.isbn_13 if preferred_edition else "",
             "asin": preferred_edition.asin if preferred_edition else "",
@@ -184,7 +183,7 @@ def build_bookshelf_queue(
                 str(row.get("display_authors") or row.get("authors") or ""),
             ),
         }
-        queue_rows.append(_ordered_row(row_payload, BOOKSHELF_QUEUE_COLUMNS))
+        queue_rows.append(ordered_export_row(row_payload, BOOKSHELF_QUEUE_COLUMNS))
     return queue_rows
 
 
@@ -319,14 +318,7 @@ def row_is_bookshelf_eligible(
     *,
     approval_mode: str,
 ) -> tuple[bool, str]:
-    priority_bucket = str(row.get("discovery_priority_bucket") or "")
-    if priority_bucket.startswith("suppressed_"):
-        return False, "suppressed discovery rows are never exported to Bookshelf"
-    if approval_mode == "safe-only":
-        return priority_bucket == "shortlist", "safe-only keeps only plain shortlist rows"
-    if approval_mode == "shortlist-only":
-        return _to_bool(row.get("eligible_for_shortlist_boolean")), "shortlist-only keeps shortlist-eligible rows"
-    return True, "all-approved keeps all non-suppressed discovery rows"
+    return discovery_row_is_export_eligible(row, approval_mode=approval_mode)
 
 
 def resolve_bookshelf_target_kind(row: Mapping[str, Any], *, requested_mode: str) -> str:
@@ -931,7 +923,7 @@ def build_bookshelf_push_log_row(
     foreign_author_id: str = "",
     reason: str = "",
 ) -> dict[str, Any]:
-    return _ordered_row(
+    return ordered_export_row(
         {
             "log_index": str(log_index),
             "row_id": str(queue_row.get("row_id") or ""),
@@ -1105,36 +1097,6 @@ def _choose_monitored_edition(
     if len(monitored) == 1:
         return monitored[0]
     return None
-
-
-def _find_preferred_edition(
-    editions: Sequence[HardcoverEdition],
-    *,
-    preferred_edition_id: str,
-) -> Optional[HardcoverEdition]:
-    target = str(preferred_edition_id or "").strip()
-    if not target:
-        return None
-    for edition in editions:
-        if str(edition.id) == target:
-            return edition
-    return None
-
-
-def _row_hardcover_slug(row: Mapping[str, Any], book: Optional[HardcoverBook]) -> str:
-    for key in ("missing_slug", "slug"):
-        value = str(row.get(key) or "").strip()
-        if value:
-            return value
-    return str(book.slug if book else "")
-
-
-def _ordered_row(payload: Mapping[str, Any], columns: Sequence[str]) -> dict[str, Any]:
-    row = {column: payload.get(column, "") for column in columns}
-    for key, value in payload.items():
-        if key not in row:
-            row[key] = value
-    return row
 
 
 def _json_copy(payload: Mapping[str, Any]) -> dict[str, Any]:

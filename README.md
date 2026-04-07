@@ -58,7 +58,7 @@ The project exposes three workflows:
    Audits books already in Calibre against Hardcover and local ebook metadata.
 
 2. `discovery`
-   Finds missing series entries and related author books, then classifies them into shortlist/review/suppressed buckets. It can also optionally export or push a conservative Bookshelf queue from those already-classified rows.
+   Finds missing series entries and related author books, then classifies them into shortlist/review/suppressed buckets. It can also optionally export or push conservative downstream queues for Bookshelf and Shelfmark from those already-classified rows.
 
 3. `apply`
    Reads `audit/write_plan.csv` and applies approved identifier updates, with optional Calibre title/author updates and optional file-level metadata write-back.
@@ -138,6 +138,14 @@ Each command writes a timestamped output directory by default unless you pass `-
 - `discovery/bookshelf_queue.json` when `--export-bookshelf` or `--push-bookshelf` is used
 - `discovery/bookshelf_push_log.csv` when `--export-bookshelf` or `--push-bookshelf` is used
 - `discovery/bookshelf_summary.md` when `--export-bookshelf` or `--push-bookshelf` is used
+- `discovery/shelfmark_queue.csv` when `--export-shelfmark` or `--push-shelfmark` is used
+- `discovery/shelfmark_queue.json` when `--export-shelfmark` or `--push-shelfmark` is used
+- `discovery/shelfmark_push_log.csv` when `--export-shelfmark` or `--push-shelfmark` is used
+- `discovery/shelfmark_release_candidates.csv` when `--export-shelfmark-releases` or `--push-shelfmark-download` is used
+- `discovery/shelfmark_release_candidates.json` when `--export-shelfmark-releases` or `--push-shelfmark-download` is used
+- `discovery/shelfmark_selected_releases.csv` when `--export-shelfmark-releases` or `--push-shelfmark-download` is used
+- `discovery/shelfmark_download_log.csv` when `--export-shelfmark-releases` or `--push-shelfmark-download` is used
+- `discovery/shelfmark_summary.md` when any Shelfmark integration flag is used
 - `run.log`
 
 ### Apply outputs
@@ -313,6 +321,211 @@ hardcover-discovery \
 ```
 
 If that Bookshelf instance reports a non-Hardcover `metadataSource`, the integration falls back to ISBN, ASIN, and title+author lookup only.
+
+## Shelfmark Discovery Integration
+
+Shelfmark now has two separate discovery-side workflows in `hardcover-discovery`:
+
+- a conservative metadata request workflow
+- a concrete release search workflow with optional explicit download queueing
+
+Both workflows are entirely opt-in and preserve the existing discovery ranking and classification behavior.
+
+Safety model:
+
+- fully opt-in: nothing is exported or pushed unless you pass a Shelfmark flag
+- default approval is `--shelfmark-approval shortlist-only`
+- `shortlist-only` exports only `eligible_for_shortlist_boolean=True` rows
+- `safe-only` is stricter and keeps only the plain `shortlist` bucket
+- `all-approved` keeps all non-suppressed discovery rows
+- suppressed rows are never exported or pushed
+- source selection for concrete releases is always explicit via `--shelfmark-source`
+- queue/download is never attempted unless you pass `--push-shelfmark-download`
+- `--dry-run` writes the same queue/log artifacts and skips live request or download mutations
+
+Shelfmark connection and control flags:
+
+- `--shelfmark-url`
+- optional `--shelfmark-username`
+- optional `--shelfmark-password`
+- optional `--shelfmark-note`
+- optional `--shelfmark-approval shortlist-only|safe-only|all-approved`
+- optional `--export-shelfmark`
+- optional `--push-shelfmark`
+- optional `--export-shelfmark-releases`
+- optional `--push-shelfmark-download`
+- required for release workflows: `--shelfmark-source`
+- optional for release workflows: `--shelfmark-content-type`
+- optional for release workflows: `--shelfmark-selection best|most_seeders|first|largest|preferred-format`
+- optional for release workflows: `--shelfmark-format-keywords epub,kepub,pdf,...`
+- optional for release workflows: `--shelfmark-min-seeders N`
+
+Shelfmark request workflow:
+
+1. `discovery` builds a request queue from already-classified discovery rows.
+2. Live request push logs in with `POST /api/auth/login`.
+3. It checks `GET /api/request-policy`.
+4. Live request submission only proceeds when:
+   - `requests_enabled=true`
+   - the ebook request policy resolves to `request_book`
+5. Discovery rows are submitted as Hardcover-backed book requests:
+   - `provider=hardcover`
+   - `provider_id=<hardcover-id>`
+   - `content_type=ebook`
+   - `request_level=book`
+   - `source=*`
+6. Duplicate pending requests are logged as explicit duplicate skips.
+
+Shelfmark release workflow:
+
+1. `discovery` searches Shelfmark releases for eligible rows.
+2. It prefers the metadata-backed route first:
+   - `GET /api/releases?provider=hardcover&book_id=<hardcover-id>&source=<explicit-source>&content_type=<content-type>`
+3. If that yields no releases, it falls back conservatively to a title+author search against the same explicit source.
+4. Returned releases are filtered locally for:
+   - explicit source match
+   - requested content type when the release advertises one
+   - requested format keywords when provided
+   - minimum seeders when provided
+   - presence of concrete `source` and `source_id`
+5. One accepted release is selected with an explicit deterministic rule:
+   - `first`
+   - `most_seeders`
+   - `largest`
+   - `preferred-format`
+   - `best`
+6. Only `--push-shelfmark-download` queues the selected release to `POST /api/releases/download`.
+   Without that flag, `discovery` exports the chosen release and logs what would have been queued.
+
+Selection rules:
+
+- `first`: first accepted release in Shelfmark response order
+- `most_seeders`: highest seeders, then larger size, then stable response order
+- `largest`: largest `size_bytes`, then higher seeders, then stable response order
+- `preferred-format`: earliest matching keyword in `--shelfmark-format-keywords`, then higher seeders, then larger size
+- `best`: if format keywords are provided, earliest matching keyword wins; otherwise a conservative built-in format priority is used, then higher seeders, then larger size
+
+Auth model:
+
+- the request workflow requires username/password because it depends on Shelfmark’s authenticated request API
+- the release workflow can run anonymously against a no-auth Shelfmark instance, or with username/password when the instance requires login
+- no dedicated Shelfmark API-key flow was found in the inspected Shelfmark codebase, so this integration uses the real username/password auth surface when auth is needed
+
+Artifacts:
+
+- `discovery/shelfmark_queue.csv`
+- `discovery/shelfmark_queue.json`
+- `discovery/shelfmark_push_log.csv`
+- `discovery/shelfmark_release_candidates.csv`
+- `discovery/shelfmark_release_candidates.json`
+- `discovery/shelfmark_selected_releases.csv`
+- `discovery/shelfmark_download_log.csv`
+- `discovery/shelfmark_summary.md`
+
+Example request queue export only:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --export-shelfmark
+```
+
+Example request dry-run validation:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --push-shelfmark \
+  --shelfmark-url http://shelfmark.local:8084 \
+  --shelfmark-username YOUR_SHELFMARK_USERNAME \
+  --shelfmark-password YOUR_SHELFMARK_PASSWORD \
+  --dry-run
+```
+
+Example release export only:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --export-shelfmark-releases \
+  --shelfmark-url http://shelfmark.local:8084 \
+  --shelfmark-source libgen
+```
+
+Example dry-run release search:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --export-shelfmark-releases \
+  --shelfmark-url http://shelfmark.local:8084 \
+  --shelfmark-source libgen \
+  --shelfmark-content-type ebook \
+  --dry-run
+```
+
+Example dry-run queue/download:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --push-shelfmark-download \
+  --shelfmark-url http://shelfmark.local:8084 \
+  --shelfmark-source libgen \
+  --shelfmark-content-type ebook \
+  --dry-run
+```
+
+Example live queue/download with explicit source selection:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --push-shelfmark-download \
+  --shelfmark-url http://shelfmark.local:8084 \
+  --shelfmark-source libgen \
+  --shelfmark-content-type ebook \
+  --shelfmark-selection best
+```
+
+Example ebook-only mode:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --export-shelfmark-releases \
+  --shelfmark-url http://shelfmark.local:8084 \
+  --shelfmark-source libgen \
+  --shelfmark-content-type ebook \
+  --shelfmark-format-keywords epub,kepub,pdf
+```
+
+Example most-seeders mode:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --push-shelfmark-download \
+  --shelfmark-url http://shelfmark.local:8084 \
+  --shelfmark-source libgen \
+  --shelfmark-selection most_seeders \
+  --shelfmark-min-seeders 10
+```
+
+Limitations:
+
+- direct queue/download still depends on Shelfmark returning at least one concrete release with `source` and `source_id`
+- if all returned releases fail source/content-type/format/min-seeder checks, the row is exported and logged as skipped
+- the request workflow and the release workflow are separate by design; request policy does not control direct release downloads
+- the release workflow does not invent or guess a release when multiple results exist; it only applies the explicit operator-selected rule and logs why that rule chose the winner
 
 ## Safe Apply Workflow
 

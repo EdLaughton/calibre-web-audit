@@ -90,6 +90,10 @@ AuditCliConfig = RuntimeCliConfig
 class DiscoveryCliConfig(RuntimeCliConfig):
     export_bookshelf: bool = False
     push_bookshelf: bool = False
+    export_shelfmark: bool = False
+    push_shelfmark: bool = False
+    export_shelfmark_releases: bool = False
+    push_shelfmark_download: bool = False
     dry_run: bool = False
     bookshelf_url: Optional[str] = None
     bookshelf_api_key: Optional[str] = None
@@ -99,6 +103,16 @@ class DiscoveryCliConfig(RuntimeCliConfig):
     bookshelf_trigger_search: bool = False
     bookshelf_mode: str = "book"
     bookshelf_approval: str = "shortlist-only"
+    shelfmark_url: Optional[str] = None
+    shelfmark_username: Optional[str] = None
+    shelfmark_password: Optional[str] = None
+    shelfmark_note: Optional[str] = None
+    shelfmark_approval: str = "shortlist-only"
+    shelfmark_source: Optional[str] = None
+    shelfmark_content_type: str = "ebook"
+    shelfmark_selection: str = "best"
+    shelfmark_format_keywords: Tuple[str, ...] = ()
+    shelfmark_min_seeders: int = 0
 
     @classmethod
     def from_namespace(cls, namespace: argparse.Namespace) -> "DiscoveryCliConfig":
@@ -107,6 +121,12 @@ class DiscoveryCliConfig(RuntimeCliConfig):
             **base.__dict__,
             export_bookshelf=bool(namespace.export_bookshelf or namespace.push_bookshelf),
             push_bookshelf=bool(namespace.push_bookshelf),
+            export_shelfmark=bool(namespace.export_shelfmark or namespace.push_shelfmark),
+            push_shelfmark=bool(namespace.push_shelfmark),
+            export_shelfmark_releases=bool(
+                namespace.export_shelfmark_releases or namespace.push_shelfmark_download
+            ),
+            push_shelfmark_download=bool(namespace.push_shelfmark_download),
             dry_run=bool(namespace.dry_run),
             bookshelf_url=str(namespace.bookshelf_url).strip() if namespace.bookshelf_url else None,
             bookshelf_api_key=str(namespace.bookshelf_api_key).strip() if namespace.bookshelf_api_key else None,
@@ -126,6 +146,20 @@ class DiscoveryCliConfig(RuntimeCliConfig):
             bookshelf_trigger_search=bool(namespace.bookshelf_trigger_search),
             bookshelf_mode=str(namespace.bookshelf_mode),
             bookshelf_approval=str(namespace.bookshelf_approval),
+            shelfmark_url=str(namespace.shelfmark_url).strip() if namespace.shelfmark_url else None,
+            shelfmark_username=str(namespace.shelfmark_username).strip() if namespace.shelfmark_username else None,
+            shelfmark_password=str(namespace.shelfmark_password) if namespace.shelfmark_password else None,
+            shelfmark_note=str(namespace.shelfmark_note).strip() if namespace.shelfmark_note else None,
+            shelfmark_approval=str(namespace.shelfmark_approval),
+            shelfmark_source=str(namespace.shelfmark_source).strip() if namespace.shelfmark_source else None,
+            shelfmark_content_type=str(namespace.shelfmark_content_type or "ebook").strip() or "ebook",
+            shelfmark_selection=str(namespace.shelfmark_selection),
+            shelfmark_format_keywords=tuple(
+                keyword.strip().lower()
+                for keyword in str(namespace.shelfmark_format_keywords or "").split(",")
+                if keyword.strip()
+            ),
+            shelfmark_min_seeders=max(0, int(namespace.shelfmark_min_seeders or 0)),
         )
 
 
@@ -269,6 +303,26 @@ def build_discovery_parser() -> argparse.ArgumentParser:
         help="Look up eligible discovery rows in Bookshelf and add them conservatively. Implies queue export.",
     )
     parser.add_argument(
+        "--export-shelfmark",
+        action="store_true",
+        help="Write an opt-in Shelfmark request queue from discovery candidates without contacting Shelfmark unless --push-shelfmark is also set.",
+    )
+    parser.add_argument(
+        "--push-shelfmark",
+        action="store_true",
+        help="Authenticate to Shelfmark and submit eligible discovery rows as conservative book-level requests when the instance request policy allows it. Implies queue export.",
+    )
+    parser.add_argument(
+        "--export-shelfmark-releases",
+        action="store_true",
+        help="Search Shelfmark for concrete releases for eligible discovery rows using an explicit source filter and write release/search artifacts without queueing downloads.",
+    )
+    parser.add_argument(
+        "--push-shelfmark-download",
+        action="store_true",
+        help="Search Shelfmark for concrete releases, select one deterministically, and queue it for download. Implies release export.",
+    )
+    parser.add_argument(
         "--bookshelf-url",
         type=str,
         default=None,
@@ -316,9 +370,69 @@ def build_discovery_parser() -> argparse.ArgumentParser:
         help="Control which discovery buckets are eligible for Bookshelf export/push. Default: shortlist-only.",
     )
     parser.add_argument(
+        "--shelfmark-url",
+        type=str,
+        default=None,
+        help="Base URL for the Shelfmark instance, for example http://shelfmark.local:8084",
+    )
+    parser.add_argument(
+        "--shelfmark-username",
+        type=str,
+        default=None,
+        help="Shelfmark username used for authenticated request submission",
+    )
+    parser.add_argument(
+        "--shelfmark-password",
+        type=str,
+        default=None,
+        help="Shelfmark password used for authenticated request submission",
+    )
+    parser.add_argument(
+        "--shelfmark-note",
+        type=str,
+        default=None,
+        help="Optional note to attach to submitted Shelfmark requests",
+    )
+    parser.add_argument(
+        "--shelfmark-approval",
+        choices=("shortlist-only", "safe-only", "all-approved"),
+        default="shortlist-only",
+        help="Control which discovery buckets are eligible for Shelfmark export/push. Default: shortlist-only.",
+    )
+    parser.add_argument(
+        "--shelfmark-source",
+        type=str,
+        default=None,
+        help="Explicit Shelfmark release source to use for release search and queue/download workflows, for example direct_download or prowlarr.",
+    )
+    parser.add_argument(
+        "--shelfmark-content-type",
+        type=str,
+        default="ebook",
+        help="Shelfmark release search content type. Default: ebook.",
+    )
+    parser.add_argument(
+        "--shelfmark-selection",
+        choices=("best", "most_seeders", "first", "largest", "preferred-format"),
+        default="best",
+        help="Deterministic release selection rule for Shelfmark release workflows. Default: best.",
+    )
+    parser.add_argument(
+        "--shelfmark-format-keywords",
+        type=str,
+        default="",
+        help="Comma-separated format keywords used to filter Shelfmark releases and to rank `preferred-format` selections, for example epub,kepub,pdf.",
+    )
+    parser.add_argument(
+        "--shelfmark-min-seeders",
+        type=int,
+        default=0,
+        help="Minimum seeders required for a Shelfmark release candidate. Default: 0.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="For Bookshelf export/push, write queue and lookup logs without posting add or search-trigger requests.",
+        help="For opt-in downstream discovery integrations, write queue/log artifacts and validate setup without sending live add/request mutations.",
     )
     return parser
 
@@ -427,8 +541,22 @@ def parse_audit_args(argv: Optional[Sequence[str]] = None) -> AuditCliConfig:
 def parse_discovery_args(argv: Optional[Sequence[str]] = None) -> DiscoveryCliConfig:
     parser = build_discovery_parser()
     namespace = _parse_with_runtime_explicit_flags(parser, argv)
-    if namespace.dry_run and not (namespace.export_bookshelf or namespace.push_bookshelf):
-        parser.error("--dry-run requires --export-bookshelf or --push-bookshelf")
+    if namespace.dry_run and not (
+        namespace.export_bookshelf
+        or namespace.push_bookshelf
+        or namespace.export_shelfmark
+        or namespace.push_shelfmark
+        or namespace.export_shelfmark_releases
+        or namespace.push_shelfmark_download
+    ):
+        parser.error(
+            "--dry-run requires an opt-in discovery integration flag such as "
+            "--export-bookshelf, --push-bookshelf, --export-shelfmark, "
+            "--push-shelfmark, --export-shelfmark-releases, or --push-shelfmark-download"
+        )
+    shelfmark_auth_flags = [bool(namespace.shelfmark_username), bool(namespace.shelfmark_password)]
+    if any(shelfmark_auth_flags) and not all(shelfmark_auth_flags):
+        parser.error("--shelfmark-username and --shelfmark-password must be provided together")
     if namespace.push_bookshelf:
         required_flags = (
             ("--bookshelf-url", namespace.bookshelf_url),
@@ -440,6 +568,25 @@ def parse_discovery_args(argv: Optional[Sequence[str]] = None) -> DiscoveryCliCo
         missing = [flag for flag, value in required_flags if value in (None, "")]
         if missing:
             parser.error("--push-bookshelf requires " + ", ".join(missing))
+    if namespace.push_shelfmark:
+        required_flags = (
+            ("--shelfmark-url", namespace.shelfmark_url),
+            ("--shelfmark-username", namespace.shelfmark_username),
+            ("--shelfmark-password", namespace.shelfmark_password),
+        )
+        missing = [flag for flag, value in required_flags if value in (None, "")]
+        if missing:
+            parser.error("--push-shelfmark requires " + ", ".join(missing))
+    if namespace.export_shelfmark_releases or namespace.push_shelfmark_download:
+        required_flags = (
+            ("--shelfmark-url", namespace.shelfmark_url),
+            ("--shelfmark-source", namespace.shelfmark_source),
+        )
+        missing = [flag for flag, value in required_flags if value in (None, "")]
+        if missing:
+            parser.error("--export-shelfmark-releases/--push-shelfmark-download require " + ", ".join(missing))
+    if namespace.shelfmark_selection == "preferred-format" and not str(namespace.shelfmark_format_keywords or "").strip():
+        parser.error("--shelfmark-selection preferred-format requires --shelfmark-format-keywords")
     return DiscoveryCliConfig.from_namespace(namespace)
 
 

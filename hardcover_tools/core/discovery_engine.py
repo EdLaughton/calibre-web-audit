@@ -16,6 +16,7 @@ from .edition_selection import is_english_language_name
 from .language import DE_STOPWORDS, EN_STOPWORDS, ES_STOPWORDS, FR_STOPWORDS, looks_englishish_text
 from .output import build_discovery_outputs
 from .runtime_support import HardcoverTokenError
+from .shelfmark_export import run_shelfmark_integration
 from . import text_normalization
 from .text_normalization import canonical_author_set, load_author_alias_map, norm
 
@@ -516,6 +517,7 @@ def _execute_discovery(context: CommandRuntimeContext, config: DiscoveryCliConfi
     owned_author_discovery = build_owned_author_discovery(rows, hardcover_client=hardcover_client, verbose=config.verbose)
     discovery_candidates = build_discovery_candidates(missing_series_books, owned_author_discovery)
     bookshelf_result = None
+    shelfmark_result = None
     if config.export_bookshelf or config.push_bookshelf:
         bookshelf_result = run_bookshelf_integration(
             discovery_candidates,
@@ -533,11 +535,38 @@ def _execute_discovery(context: CommandRuntimeContext, config: DiscoveryCliConfi
             bookshelf_trigger_search=config.bookshelf_trigger_search,
             verbose=config.verbose,
         )
+    if (
+        config.export_shelfmark
+        or config.push_shelfmark
+        or config.export_shelfmark_releases
+        or config.push_shelfmark_download
+    ):
+        shelfmark_result = run_shelfmark_integration(
+            discovery_candidates,
+            hardcover_client=hardcover_client,
+            export_shelfmark=config.export_shelfmark,
+            push_shelfmark=config.push_shelfmark,
+            export_shelfmark_releases=config.export_shelfmark_releases,
+            push_shelfmark_download=config.push_shelfmark_download,
+            dry_run=config.dry_run,
+            approval_mode=config.shelfmark_approval,
+            shelfmark_url=config.shelfmark_url,
+            shelfmark_username=config.shelfmark_username,
+            shelfmark_password=config.shelfmark_password,
+            shelfmark_note=config.shelfmark_note,
+            shelfmark_source=config.shelfmark_source,
+            shelfmark_content_type=config.shelfmark_content_type,
+            shelfmark_selection=config.shelfmark_selection,
+            shelfmark_format_keywords=config.shelfmark_format_keywords,
+            shelfmark_min_seeders=config.shelfmark_min_seeders,
+            verbose=config.verbose,
+        )
 
     outputs = build_discovery_outputs(
         discovery_candidates,
         context.runtime_paths.output_dir,
         bookshelf_result=bookshelf_result,
+        shelfmark_result=shelfmark_result,
     )
     shortlist_count = sum(1 for row in discovery_candidates if _to_bool(row.get("eligible_for_shortlist_boolean")))
     return DiscoveryCommandResult(
@@ -549,6 +578,12 @@ def _execute_discovery(context: CommandRuntimeContext, config: DiscoveryCliConfi
         bookshelf_queue_count=len(bookshelf_result.queue_rows) if bookshelf_result is not None else 0,
         bookshelf_push_log_count=len(bookshelf_result.push_log_rows) if bookshelf_result is not None else 0,
         bookshelf_metadata_backend=bookshelf_result.metadata_backend if bookshelf_result is not None else "",
+        shelfmark_queue_count=len(shelfmark_result.queue_rows) if shelfmark_result is not None else 0,
+        shelfmark_push_log_count=len(shelfmark_result.push_log_rows) if shelfmark_result is not None else 0,
+        shelfmark_release_candidate_count=len(shelfmark_result.release_candidate_rows) if shelfmark_result is not None else 0,
+        shelfmark_selected_release_count=len(shelfmark_result.selected_release_rows) if shelfmark_result is not None else 0,
+        shelfmark_download_log_count=len(shelfmark_result.download_log_rows) if shelfmark_result is not None else 0,
+        shelfmark_request_policy_mode=shelfmark_result.request_policy_mode if shelfmark_result is not None else "",
     )
 
 
@@ -562,6 +597,18 @@ def _print_discovery_result(result: DiscoveryCommandResult, config: DiscoveryCli
             print(f"Bookshelf log rows written: {result.bookshelf_push_log_count}")
         if config.push_bookshelf:
             print(f"Bookshelf metadata backend: {result.bookshelf_metadata_backend or 'not_checked'}")
+    if result.outputs.shelfmark_queue is not None:
+        print(f"Shelfmark queue rows written: {result.shelfmark_queue_count}")
+        if result.outputs.shelfmark_push_log is not None and result.shelfmark_push_log_count:
+            print(f"Shelfmark log rows written: {result.shelfmark_push_log_count}")
+        if config.push_shelfmark:
+            print(f"Shelfmark ebook request policy: {result.shelfmark_request_policy_mode or 'not_checked'}")
+    if result.outputs.shelfmark_release_candidates is not None:
+        print(f"Shelfmark release candidate rows written: {result.shelfmark_release_candidate_count}")
+    if result.outputs.shelfmark_selected_releases is not None:
+        print(f"Shelfmark selected release rows written: {result.shelfmark_selected_release_count}")
+    if result.outputs.shelfmark_download_log is not None and result.shelfmark_download_log_count:
+        print(f"Shelfmark download log rows written: {result.shelfmark_download_log_count}")
     for line in result.hardcover_stats_lines:
         print(line)
     print("Done.")
@@ -571,6 +618,16 @@ def _print_discovery_result(result: DiscoveryCommandResult, config: DiscoveryCli
         print(f"Bookshelf queue: {result.outputs.bookshelf_queue}")
     if result.outputs.bookshelf_push_log is not None:
         print(f"Bookshelf push log: {result.outputs.bookshelf_push_log}")
+    if result.outputs.shelfmark_queue is not None:
+        print(f"Shelfmark queue: {result.outputs.shelfmark_queue}")
+    if result.outputs.shelfmark_push_log is not None:
+        print(f"Shelfmark push log: {result.outputs.shelfmark_push_log}")
+    if result.outputs.shelfmark_release_candidates is not None:
+        print(f"Shelfmark release candidates: {result.outputs.shelfmark_release_candidates}")
+    if result.outputs.shelfmark_selected_releases is not None:
+        print(f"Shelfmark selected releases: {result.outputs.shelfmark_selected_releases}")
+    if result.outputs.shelfmark_download_log is not None:
+        print(f"Shelfmark download log: {result.outputs.shelfmark_download_log}")
 
 
 def run_discovery(config: DiscoveryCliConfig) -> int:
