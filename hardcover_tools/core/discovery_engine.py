@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import re
 import sys
 from collections import defaultdict
@@ -9,15 +8,15 @@ from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 from .audit_pipeline import audit_books
 from .bookshelf_export import run_bookshelf_integration
 from .calibre_db import load_calibre_books
+from .command_results import DiscoveryCommandResult
+from .command_runtime import CommandRuntimeContext, open_command_runtime
 from .config import DiscoveryCliConfig
 from .discovery_sources import build_missing_series_books, build_owned_author_discovery
-from .ebook_meta import EbookMetaRunner
 from .edition_selection import is_english_language_name
-from .hardcover_client import HardcoverClient
 from .language import DE_STOPWORDS, EN_STOPWORDS, ES_STOPWORDS, FR_STOPWORDS, looks_englishish_text
 from .output import build_discovery_outputs
-from .runtime_io import TeeStream
-from .runtime_support import resolve_runtime_paths, validate_hardcover_token
+from .runtime_support import HardcoverTokenError
+from .shelfmark_export import run_shelfmark_integration
 from . import text_normalization
 from .text_normalization import canonical_author_set, load_author_alias_map, norm
 
@@ -472,130 +471,172 @@ def build_discovery_candidates(
     return annotate_discovery_candidates(candidates)
 
 
-def run_discovery(config: DiscoveryCliConfig) -> int:
-    try:
-        token = validate_hardcover_token(os.environ.get("HARDCOVER_TOKEN", ""))
-    except ValueError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 2
-
+def _configure_author_aliases(config: DiscoveryCliConfig) -> None:
     text_normalization.AUTHOR_ALIAS_MAP = load_author_alias_map(config.author_aliases_json)
-    runtime_paths = resolve_runtime_paths(
-        library_root=config.library_root,
-        metadata_db=config.metadata_db,
-        output_dir=config.output_dir,
-        cache_path=config.cache_path,
+
+
+def _print_discovery_setup(context: CommandRuntimeContext, config: DiscoveryCliConfig, record_count: int) -> None:
+    runtime_paths = context.runtime_paths
+    print(f"Using library root: {runtime_paths.library_root}")
+    print(f"Using metadata DB: {runtime_paths.metadata_db}")
+    if runtime_paths.resolution_source != "cli":
+        print(f"Runtime source: {runtime_paths.resolution_source}")
+    print(f"Writing outputs to: {runtime_paths.output_dir}")
+    print(f"Using cache DB: {runtime_paths.cache_path}")
+    if runtime_paths.legacy_cache_json_path.exists():
+        print(f"Legacy JSON cache detected: {runtime_paths.legacy_cache_json_path}")
+    print(f"Writing log to: {runtime_paths.log_path}")
+    print(f"Loaded {record_count} calibre records")
+    if config.verbose:
+        state = "on" if config.debug_hardcover else "off"
+        print(
+            "Verbose discovery logging enabled "
+            f"(progress every {config.progress_every} books; low-level Hardcover debug={state})"
+        )
+
+
+def _execute_discovery(context: CommandRuntimeContext, config: DiscoveryCliConfig) -> DiscoveryCommandResult:
+    records = load_calibre_books(context.runtime_paths.metadata_db, context.runtime_paths.library_root)
+    _print_discovery_setup(context, config, len(records))
+
+    hardcover_client = context.create_hardcover_client(config)
+    ebook_meta_runner = context.create_ebook_meta_runner(config)
+
+    print("Starting audit prerequisite pass...")
+    rows = audit_books(
+        records,
+        hardcover_client=hardcover_client,
+        ebook_meta_runner=ebook_meta_runner,
+        limit=config.limit,
+        verbose=config.verbose,
+        progress_every=config.progress_every,
+    )
+    print("Starting missing-series pass...")
+    missing_series_books = build_missing_series_books(rows, hardcover_client=hardcover_client, verbose=config.verbose)
+    print("Starting owned-author discovery pass...")
+    owned_author_discovery = build_owned_author_discovery(rows, hardcover_client=hardcover_client, verbose=config.verbose)
+    discovery_candidates = build_discovery_candidates(missing_series_books, owned_author_discovery)
+    bookshelf_result = None
+    shelfmark_result = None
+    if config.export_bookshelf or config.push_bookshelf:
+        bookshelf_result = run_bookshelf_integration(
+            discovery_candidates,
+            hardcover_client=hardcover_client,
+            export_bookshelf=config.export_bookshelf,
+            push_bookshelf=config.push_bookshelf,
+            dry_run=config.dry_run,
+            approval_mode=config.bookshelf_approval,
+            requested_mode=config.bookshelf_mode,
+            bookshelf_url=config.bookshelf_url,
+            bookshelf_api_key=config.bookshelf_api_key,
+            bookshelf_root_folder=config.bookshelf_root_folder,
+            bookshelf_quality_profile_id=config.bookshelf_quality_profile_id,
+            bookshelf_metadata_profile_id=config.bookshelf_metadata_profile_id,
+            bookshelf_trigger_search=config.bookshelf_trigger_search,
+            verbose=config.verbose,
+        )
+    if (
+        config.export_shelfmark
+        or config.push_shelfmark
+        or config.export_shelfmark_releases
+        or config.push_shelfmark_download
+    ):
+        shelfmark_result = run_shelfmark_integration(
+            discovery_candidates,
+            hardcover_client=hardcover_client,
+            export_shelfmark=config.export_shelfmark,
+            push_shelfmark=config.push_shelfmark,
+            export_shelfmark_releases=config.export_shelfmark_releases,
+            push_shelfmark_download=config.push_shelfmark_download,
+            dry_run=config.dry_run,
+            approval_mode=config.shelfmark_approval,
+            shelfmark_url=config.shelfmark_url,
+            shelfmark_username=config.shelfmark_username,
+            shelfmark_password=config.shelfmark_password,
+            shelfmark_note=config.shelfmark_note,
+            shelfmark_source=config.shelfmark_source,
+            shelfmark_content_type=config.shelfmark_content_type,
+            shelfmark_selection=config.shelfmark_selection,
+            shelfmark_format_keywords=config.shelfmark_format_keywords,
+            shelfmark_min_seeders=config.shelfmark_min_seeders,
+            verbose=config.verbose,
+        )
+
+    outputs = build_discovery_outputs(
+        discovery_candidates,
+        context.runtime_paths.output_dir,
+        bookshelf_result=bookshelf_result,
+        shelfmark_result=shelfmark_result,
+    )
+    shortlist_count = sum(1 for row in discovery_candidates if _to_bool(row.get("eligible_for_shortlist_boolean")))
+    return DiscoveryCommandResult(
+        outputs=outputs,
+        row_count=len(discovery_candidates),
+        shortlist_count=shortlist_count,
+        non_shortlist_count=len(discovery_candidates) - shortlist_count,
+        hardcover_stats_lines=tuple(hardcover_client.stats_summary_lines()),
+        bookshelf_queue_count=len(bookshelf_result.queue_rows) if bookshelf_result is not None else 0,
+        bookshelf_push_log_count=len(bookshelf_result.push_log_rows) if bookshelf_result is not None else 0,
+        bookshelf_metadata_backend=bookshelf_result.metadata_backend if bookshelf_result is not None else "",
+        shelfmark_queue_count=len(shelfmark_result.queue_rows) if shelfmark_result is not None else 0,
+        shelfmark_push_log_count=len(shelfmark_result.push_log_rows) if shelfmark_result is not None else 0,
+        shelfmark_release_candidate_count=len(shelfmark_result.release_candidate_rows) if shelfmark_result is not None else 0,
+        shelfmark_selected_release_count=len(shelfmark_result.selected_release_rows) if shelfmark_result is not None else 0,
+        shelfmark_download_log_count=len(shelfmark_result.download_log_rows) if shelfmark_result is not None else 0,
+        shelfmark_request_policy_mode=shelfmark_result.request_policy_mode if shelfmark_result is not None else "",
     )
 
-    original_stdout = sys.stdout
-    original_stderr = sys.stderr
-    with runtime_paths.log_path.open("w", encoding="utf-8") as log_handle:
-        sys.stdout = TeeStream(original_stdout, log_handle)
-        sys.stderr = TeeStream(original_stderr, log_handle)
-        try:
-            print(f"Using library root: {runtime_paths.library_root}")
-            print(f"Using metadata DB: {runtime_paths.metadata_db}")
-            print(f"Writing outputs to: {runtime_paths.output_dir}")
-            print(f"Using cache DB: {runtime_paths.cache_path}")
-            if runtime_paths.legacy_cache_json_path.exists():
-                print(f"Legacy JSON cache detected: {runtime_paths.legacy_cache_json_path}")
-            print(f"Writing log to: {runtime_paths.log_path}")
 
-            records = load_calibre_books(runtime_paths.metadata_db, runtime_paths.library_root)
-            print(f"Loaded {len(records)} calibre records")
-            if config.verbose:
-                state = "on" if config.debug_hardcover else "off"
-                print(
-                    "Verbose discovery logging enabled "
-                    f"(progress every {config.progress_every} books; low-level Hardcover debug={state})"
-                )
+def _print_discovery_result(result: DiscoveryCommandResult, config: DiscoveryCliConfig) -> None:
+    print(f"Discovery rows written: {result.row_count}")
+    print(f"Shortlist-eligible discovery rows: {result.shortlist_count}")
+    print(f"Manual-review / suppressed discovery rows: {result.non_shortlist_count}")
+    if result.outputs.bookshelf_queue is not None:
+        print(f"Bookshelf queue rows written: {result.bookshelf_queue_count}")
+        if result.outputs.bookshelf_push_log is not None and result.bookshelf_push_log_count:
+            print(f"Bookshelf log rows written: {result.bookshelf_push_log_count}")
+        if config.push_bookshelf:
+            print(f"Bookshelf metadata backend: {result.bookshelf_metadata_backend or 'not_checked'}")
+    if result.outputs.shelfmark_queue is not None:
+        print(f"Shelfmark queue rows written: {result.shelfmark_queue_count}")
+        if result.outputs.shelfmark_push_log is not None and result.shelfmark_push_log_count:
+            print(f"Shelfmark log rows written: {result.shelfmark_push_log_count}")
+        if config.push_shelfmark:
+            print(f"Shelfmark ebook request policy: {result.shelfmark_request_policy_mode or 'not_checked'}")
+    if result.outputs.shelfmark_release_candidates is not None:
+        print(f"Shelfmark release candidate rows written: {result.shelfmark_release_candidate_count}")
+    if result.outputs.shelfmark_selected_releases is not None:
+        print(f"Shelfmark selected release rows written: {result.shelfmark_selected_release_count}")
+    if result.outputs.shelfmark_download_log is not None and result.shelfmark_download_log_count:
+        print(f"Shelfmark download log rows written: {result.shelfmark_download_log_count}")
+    for line in result.hardcover_stats_lines:
+        print(line)
+    print("Done.")
+    print(f"Discovery summary: {result.outputs.summary}")
+    print(f"Discovery candidates: {result.outputs.candidates}")
+    if result.outputs.bookshelf_queue is not None:
+        print(f"Bookshelf queue: {result.outputs.bookshelf_queue}")
+    if result.outputs.bookshelf_push_log is not None:
+        print(f"Bookshelf push log: {result.outputs.bookshelf_push_log}")
+    if result.outputs.shelfmark_queue is not None:
+        print(f"Shelfmark queue: {result.outputs.shelfmark_queue}")
+    if result.outputs.shelfmark_push_log is not None:
+        print(f"Shelfmark push log: {result.outputs.shelfmark_push_log}")
+    if result.outputs.shelfmark_release_candidates is not None:
+        print(f"Shelfmark release candidates: {result.outputs.shelfmark_release_candidates}")
+    if result.outputs.shelfmark_selected_releases is not None:
+        print(f"Shelfmark selected releases: {result.outputs.shelfmark_selected_releases}")
+    if result.outputs.shelfmark_download_log is not None:
+        print(f"Shelfmark download log: {result.outputs.shelfmark_download_log}")
 
-            hc = HardcoverClient(
-                token=token,
-                cache_path=runtime_paths.cache_path,
-                timeout=config.hardcover_timeout,
-                retries=config.hardcover_retries,
-                user_agent=config.hardcover_user_agent,
-                min_interval=config.hardcover_min_interval,
-                verbose=config.verbose,
-                cache_ttl_hours=config.cache_ttl_hours,
-                search_cache_ttl_hours=config.search_cache_ttl_hours,
-                empty_cache_ttl_hours=config.empty_cache_ttl_hours,
-                edition_cache_ttl_hours=config.edition_cache_ttl_hours,
-                legacy_cache_json_path=runtime_paths.legacy_cache_json_path,
-                debug_hardcover=config.debug_hardcover,
-            )
-            ebook_meta_runner = EbookMetaRunner(
-                library_root=runtime_paths.library_root,
-                ebook_meta_command=config.ebook_meta_command,
-                docker_container_name=config.docker_ebook_meta_container,
-                container_library_root=config.container_library_root,
-                host_timeout=config.ebook_meta_host_timeout,
-                docker_timeout=config.ebook_meta_docker_timeout,
-            )
 
-            print("Starting audit prerequisite pass...")
-            rows = audit_books(
-                records,
-                hardcover_client=hc,
-                ebook_meta_runner=ebook_meta_runner,
-                limit=config.limit,
-                verbose=config.verbose,
-                progress_every=config.progress_every,
-            )
-            print("Starting missing-series pass...")
-            missing_series_books = build_missing_series_books(rows, hardcover_client=hc, verbose=config.verbose)
-            print("Starting owned-author discovery pass...")
-            owned_author_discovery = build_owned_author_discovery(rows, hardcover_client=hc, verbose=config.verbose)
-            discovery_candidates = build_discovery_candidates(missing_series_books, owned_author_discovery)
-            bookshelf_result = None
-            if config.export_bookshelf or config.push_bookshelf:
-                bookshelf_result = run_bookshelf_integration(
-                    discovery_candidates,
-                    hardcover_client=hc,
-                    export_bookshelf=config.export_bookshelf,
-                    push_bookshelf=config.push_bookshelf,
-                    dry_run=config.dry_run,
-                    approval_mode=config.bookshelf_approval,
-                    requested_mode=config.bookshelf_mode,
-                    bookshelf_url=config.bookshelf_url,
-                    bookshelf_api_key=config.bookshelf_api_key,
-                    bookshelf_root_folder=config.bookshelf_root_folder,
-                    bookshelf_quality_profile_id=config.bookshelf_quality_profile_id,
-                    bookshelf_metadata_profile_id=config.bookshelf_metadata_profile_id,
-                    bookshelf_trigger_search=config.bookshelf_trigger_search,
-                    verbose=config.verbose,
-                )
-            output_paths = build_discovery_outputs(
-                discovery_candidates,
-                runtime_paths.output_dir,
-                bookshelf_result=bookshelf_result,
-            )
-
-            shortlist_count = sum(1 for row in discovery_candidates if _to_bool(row.get("eligible_for_shortlist_boolean")))
-            print(f"Discovery rows written: {len(discovery_candidates)}")
-            print(f"Shortlist-eligible discovery rows: {shortlist_count}")
-            print(f"Manual-review / suppressed discovery rows: {len(discovery_candidates) - shortlist_count}")
-            if bookshelf_result is not None:
-                print(f"Bookshelf queue rows written: {len(bookshelf_result.queue_rows)}")
-                if config.push_bookshelf:
-                    print(
-                        "Bookshelf metadata backend: "
-                        f"{bookshelf_result.metadata_backend or 'not_checked'}"
-                    )
-            hc.print_stats_summary()
-            print("Done.")
-            print(f"Discovery summary: {output_paths['summary']}")
-            print(f"Discovery candidates: {output_paths['candidates']}")
-            if bookshelf_result is not None:
-                print(f"Bookshelf queue: {output_paths['bookshelf_queue']}")
-                print(f"Bookshelf push log: {output_paths['bookshelf_push_log']}")
-            return 0
-        finally:
-            try:
-                if "hc" in locals() and hc is not None:
-                    hc.close()
-            except Exception:
-                pass
-            sys.stdout = original_stdout
-            sys.stderr = original_stderr
+def run_discovery(config: DiscoveryCliConfig) -> int:
+    try:
+        _configure_author_aliases(config)
+        with open_command_runtime(config, command_name="discovery", require_hardcover_token=True) as context:
+            result = _execute_discovery(context, config)
+            _print_discovery_result(result, config)
+            return result.exit_code
+    except HardcoverTokenError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2

@@ -41,11 +41,11 @@ def test_build_audit_outputs_writes_operator_sheet_and_summary_rollups(tmp_path)
     rows = _parity_rows() + [probe_row]
     output_paths = build_audit_outputs(rows, tmp_path)
 
-    actions_rows = _read_csv(output_paths["actions"])
-    operator_rows = _read_csv(output_paths["actions_operator"])
-    write_plan_rows = _read_csv(output_paths["write_plan"])
-    summary_text = output_paths["summary"].read_text(encoding="utf-8")
-    readme_text = output_paths["readme"].read_text(encoding="utf-8")
+    actions_rows = _read_csv(output_paths.actions)
+    operator_rows = _read_csv(output_paths.actions_operator)
+    write_plan_rows = _read_csv(output_paths.write_plan)
+    summary_text = output_paths.summary.read_text(encoding="utf-8")
+    readme_text = output_paths.readme.read_text(encoding="utf-8")
 
     assert len(operator_rows) == len(actions_rows)
     assert len(write_plan_rows) == len(rows)

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Sequence
+from typing import Any, Iterable, List, Mapping, Sequence
 
 from .audit_insights import (
     build_metadata_probe_rollup,
@@ -20,6 +21,14 @@ from .bookshelf_export import (
     BOOKSHELF_PUSH_LOG_COLUMNS,
     BOOKSHELF_QUEUE_COLUMNS,
     BookshelfIntegrationResult,
+)
+from .shelfmark_export import (
+    SHELFMARK_DOWNLOAD_LOG_COLUMNS,
+    SHELFMARK_PUSH_LOG_COLUMNS,
+    SHELFMARK_QUEUE_COLUMNS,
+    SHELFMARK_RELEASE_CANDIDATE_COLUMNS,
+    SHELFMARK_SELECTED_RELEASE_COLUMNS,
+    ShelfmarkIntegrationResult,
 )
 from .runtime_io import ensure_dir, write_csv, write_json
 
@@ -69,9 +78,52 @@ AUDIT_OPERATOR_COLUMNS = [
 ]
 
 
+@dataclass(frozen=True)
+class CommandOutputPaths:
+    root: Path
+    summary: Path
+    readme: Path
+
+
+@dataclass(frozen=True)
+class AuditOutputPaths(CommandOutputPaths):
+    actions_operator: Path
+    actions: Path
+    write_plan: Path
+
+
+@dataclass(frozen=True)
+class DiscoveryOutputPaths(CommandOutputPaths):
+    candidates: Path
+    bookshelf_queue: Path | None = None
+    bookshelf_queue_json: Path | None = None
+    bookshelf_push_log: Path | None = None
+    bookshelf_summary: Path | None = None
+    shelfmark_queue: Path | None = None
+    shelfmark_queue_json: Path | None = None
+    shelfmark_push_log: Path | None = None
+    shelfmark_release_candidates: Path | None = None
+    shelfmark_release_candidates_json: Path | None = None
+    shelfmark_selected_releases: Path | None = None
+    shelfmark_download_log: Path | None = None
+    shelfmark_summary: Path | None = None
+
+
+@dataclass(frozen=True)
+class ApplyOutputPaths(CommandOutputPaths):
+    apply_log: Path
+
+
 def _write_summary(path: Path, lines: Iterable[str]) -> None:
     ensure_dir(path.parent)
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def _write_root_readme(output_dir: Path, section_name: str, lines: Sequence[str]) -> Path:
+    readme_lines = ["# Output overview", "", f"## {section_name}", *lines, "", "`run.log` remains in the root output directory for the full execution trace."]
+    path = output_dir / "README.md"
+    _write_summary(path, readme_lines)
+    return path
 
 
 def _enrich_write_plan_rows(rows: Sequence[Any], write_plan: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -97,8 +149,8 @@ def _enrich_write_plan_rows(rows: Sequence[Any], write_plan: Sequence[Mapping[st
     return enriched_rows
 
 
-def _build_actions_operator_rows(audit_actions: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
-    output: List[Dict[str, Any]] = []
+def _build_actions_operator_rows(audit_actions: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
     for row in audit_actions:
         metadata_probe_warning, metadata_probe_details = metadata_probe_diagnostic(row)
         operator_row = {
@@ -152,7 +204,7 @@ def _build_actions_operator_rows(audit_actions: Sequence[Mapping[str, Any]]) -> 
     return output
 
 
-def build_audit_outputs(rows: Sequence[Any], output_dir: Path) -> Dict[str, Path]:
+def build_audit_outputs(rows: Sequence[Any], output_dir: Path) -> AuditOutputPaths:
     ensure_dir(output_dir)
     audit_dir = output_dir / "audit"
     ensure_dir(audit_dir)
@@ -240,27 +292,25 @@ def build_audit_outputs(rows: Sequence[Any], output_dir: Path) -> Dict[str, Path
     )
     _write_summary(audit_dir / "summary.md", summary_lines)
 
-    readme_lines = [
-        "# Output overview",
-        "",
-        "## Audit",
-        f"- Summary: `{(audit_dir / 'summary.md').name}`",
-        f"- Operator review sheet: `{(audit_dir / 'actions_operator.csv').name}` — compact triage-first layout derived from the action rows",
-        f"- Actions: `{(audit_dir / 'actions.csv').name}` — prioritized non-keep audit rows and review rows",
-        f"- Write plan: `{(audit_dir / 'write_plan.csv').name}` — full-library apply sheet; review `safe_to_apply_boolean` and `action_type` before apply",
-        "",
-        "`run.log` remains in the root output directory for the full execution trace.",
-    ]
-    _write_summary(output_dir / "README.md", readme_lines)
+    readme_path = _write_root_readme(
+        output_dir,
+        "Audit",
+        [
+            f"- Summary: `{(audit_dir / 'summary.md').name}`",
+            f"- Operator review sheet: `{(audit_dir / 'actions_operator.csv').name}` — compact triage-first layout derived from the action rows",
+            f"- Actions: `{(audit_dir / 'actions.csv').name}` — prioritized non-keep audit rows and review rows",
+            f"- Write plan: `{(audit_dir / 'write_plan.csv').name}` — full-library apply sheet; review `safe_to_apply_boolean` and `action_type` before apply",
+        ],
+    )
 
-    return {
-        "root": output_dir,
-        "summary": audit_dir / "summary.md",
-        "actions_operator": audit_dir / "actions_operator.csv",
-        "actions": audit_dir / "actions.csv",
-        "write_plan": audit_dir / "write_plan.csv",
-        "readme": output_dir / "README.md",
-    }
+    return AuditOutputPaths(
+        root=output_dir,
+        summary=audit_dir / "summary.md",
+        readme=readme_path,
+        actions_operator=audit_dir / "actions_operator.csv",
+        actions=audit_dir / "actions.csv",
+        write_plan=audit_dir / "write_plan.csv",
+    )
 
 
 def build_discovery_outputs(
@@ -268,7 +318,8 @@ def build_discovery_outputs(
     output_dir: Path,
     *,
     bookshelf_result: BookshelfIntegrationResult | None = None,
-) -> Dict[str, Path]:
+    shelfmark_result: ShelfmarkIntegrationResult | None = None,
+) -> DiscoveryOutputPaths:
     ensure_dir(output_dir)
     discovery_dir = output_dir / "discovery"
     ensure_dir(discovery_dir)
@@ -300,26 +351,36 @@ def build_discovery_outputs(
             "- candidates.csv — unified discovery sheet for missing-series and owned-author candidates",
         ]
     )
-    output_paths: Dict[str, Path] = {
-        "root": output_dir,
-        "summary": discovery_dir / "summary.md",
-        "candidates": discovery_dir / "candidates.csv",
-        "readme": output_dir / "README.md",
-    }
+    bookshelf_queue_path: Path | None = None
+    bookshelf_queue_json_path: Path | None = None
+    bookshelf_push_log_path: Path | None = None
+    bookshelf_summary_path: Path | None = None
+    shelfmark_queue_path: Path | None = None
+    shelfmark_queue_json_path: Path | None = None
+    shelfmark_push_log_path: Path | None = None
+    shelfmark_release_candidates_path: Path | None = None
+    shelfmark_release_candidates_json_path: Path | None = None
+    shelfmark_selected_releases_path: Path | None = None
+    shelfmark_download_log_path: Path | None = None
+    shelfmark_summary_path: Path | None = None
 
     if bookshelf_result is not None:
+        bookshelf_queue_path = discovery_dir / "bookshelf_queue.csv"
+        bookshelf_queue_json_path = discovery_dir / "bookshelf_queue.json"
+        bookshelf_push_log_path = discovery_dir / "bookshelf_push_log.csv"
+        bookshelf_summary_path = discovery_dir / "bookshelf_summary.md"
         write_csv(
-            discovery_dir / "bookshelf_queue.csv",
+            bookshelf_queue_path,
             list(bookshelf_result.queue_rows),
             fieldnames=BOOKSHELF_QUEUE_COLUMNS,
         )
-        write_json(discovery_dir / "bookshelf_queue.json", list(bookshelf_result.queue_rows))
+        write_json(bookshelf_queue_json_path, list(bookshelf_result.queue_rows))
         write_csv(
-            discovery_dir / "bookshelf_push_log.csv",
+            bookshelf_push_log_path,
             list(bookshelf_result.push_log_rows),
             fieldnames=BOOKSHELF_PUSH_LOG_COLUMNS,
         )
-        _write_summary(discovery_dir / "bookshelf_summary.md", bookshelf_result.summary_lines)
+        _write_summary(bookshelf_summary_path, bookshelf_result.summary_lines)
         summary_lines.extend(
             [
                 "",
@@ -336,20 +397,88 @@ def build_discovery_outputs(
                 "- bookshelf_summary.md — Bookshelf export/push summary",
             ]
         )
-        output_paths.update(
-            {
-                "bookshelf_queue": discovery_dir / "bookshelf_queue.csv",
-                "bookshelf_queue_json": discovery_dir / "bookshelf_queue.json",
-                "bookshelf_push_log": discovery_dir / "bookshelf_push_log.csv",
-                "bookshelf_summary": discovery_dir / "bookshelf_summary.md",
-            }
-        )
+    if shelfmark_result is not None:
+        shelfmark_summary_path = discovery_dir / "shelfmark_summary.md"
+        if shelfmark_result.request_workflow_enabled:
+            shelfmark_queue_path = discovery_dir / "shelfmark_queue.csv"
+            shelfmark_queue_json_path = discovery_dir / "shelfmark_queue.json"
+            shelfmark_push_log_path = discovery_dir / "shelfmark_push_log.csv"
+            write_csv(
+                shelfmark_queue_path,
+                list(shelfmark_result.queue_rows),
+                fieldnames=SHELFMARK_QUEUE_COLUMNS,
+            )
+            write_json(shelfmark_queue_json_path, list(shelfmark_result.queue_rows))
+            write_csv(
+                shelfmark_push_log_path,
+                list(shelfmark_result.push_log_rows),
+                fieldnames=SHELFMARK_PUSH_LOG_COLUMNS,
+            )
+        if shelfmark_result.release_workflow_enabled:
+            shelfmark_release_candidates_path = discovery_dir / "shelfmark_release_candidates.csv"
+            shelfmark_release_candidates_json_path = discovery_dir / "shelfmark_release_candidates.json"
+            shelfmark_selected_releases_path = discovery_dir / "shelfmark_selected_releases.csv"
+            shelfmark_download_log_path = discovery_dir / "shelfmark_download_log.csv"
+            write_csv(
+                shelfmark_release_candidates_path,
+                list(shelfmark_result.release_candidate_rows),
+                fieldnames=SHELFMARK_RELEASE_CANDIDATE_COLUMNS,
+            )
+            write_json(
+                shelfmark_release_candidates_json_path,
+                list(shelfmark_result.release_candidate_rows),
+            )
+            write_csv(
+                shelfmark_selected_releases_path,
+                list(shelfmark_result.selected_release_rows),
+                fieldnames=SHELFMARK_SELECTED_RELEASE_COLUMNS,
+            )
+            write_csv(
+                shelfmark_download_log_path,
+                list(shelfmark_result.download_log_rows),
+                fieldnames=SHELFMARK_DOWNLOAD_LOG_COLUMNS,
+            )
+        _write_summary(shelfmark_summary_path, shelfmark_result.summary_lines)
+        summary_lines.extend(["", "## Shelfmark"])
+        if shelfmark_result.request_workflow_enabled:
+            summary_lines.extend(
+                [
+                    f"- Shelfmark request queue rows: **{len(shelfmark_result.queue_rows)}**",
+                    f"- Shelfmark request log rows: **{len(shelfmark_result.push_log_rows)}**",
+                    f"- Requests enabled: **{'yes' if shelfmark_result.requests_enabled else 'no'}**",
+                    f"- Ebook request policy: **{shelfmark_result.request_policy_mode or 'not_checked'}**",
+                ]
+            )
+        if shelfmark_result.release_workflow_enabled:
+            summary_lines.extend(
+                [
+                    f"- Shelfmark release candidate rows: **{len(shelfmark_result.release_candidate_rows)}**",
+                    f"- Shelfmark selected release rows: **{len(shelfmark_result.selected_release_rows)}**",
+                    f"- Shelfmark download log rows: **{len(shelfmark_result.download_log_rows)}**",
+                ]
+            )
+        summary_lines.extend(["- See `shelfmark_summary.md` for the full export/push trace.", "", "## Shelfmark Files"])
+        if shelfmark_result.request_workflow_enabled:
+            summary_lines.extend(
+                [
+                    "- shelfmark_queue.csv — opt-in Shelfmark request queue derived from eligible discovery rows",
+                    "- shelfmark_queue.json — JSON form of the Shelfmark request queue",
+                    "- shelfmark_push_log.csv — step-by-step Shelfmark request export and push log",
+                ]
+            )
+        if shelfmark_result.release_workflow_enabled:
+            summary_lines.extend(
+                [
+                    "- shelfmark_release_candidates.csv — concrete Shelfmark releases with accept/reject details",
+                    "- shelfmark_release_candidates.json — JSON form of the release candidate set",
+                    "- shelfmark_selected_releases.csv — per-row selected release summary",
+                    "- shelfmark_download_log.csv — release search, selection, and queue/download trace",
+                ]
+            )
+        summary_lines.append("- shelfmark_summary.md — combined Shelfmark integration summary")
     _write_summary(discovery_dir / "summary.md", summary_lines)
 
     readme_lines = [
-        "# Output overview",
-        "",
-        "## Discovery",
         f"- Summary: `{(discovery_dir / 'summary.md').name}`",
         f"- Candidates: `{(discovery_dir / 'candidates.csv').name}`",
     ]
@@ -362,10 +491,45 @@ def build_discovery_outputs(
                 f"- Bookshelf summary: `{(discovery_dir / 'bookshelf_summary.md').name}`",
             ]
         )
-    readme_lines.extend(["", "`run.log` remains in the root output directory for the full execution trace."])
-    _write_summary(output_dir / "README.md", readme_lines)
+    if shelfmark_result is not None:
+        if shelfmark_result.request_workflow_enabled:
+            readme_lines.extend(
+                [
+                    f"- Shelfmark request queue: `{(discovery_dir / 'shelfmark_queue.csv').name}`",
+                    f"- Shelfmark request queue JSON: `{(discovery_dir / 'shelfmark_queue.json').name}`",
+                    f"- Shelfmark request log: `{(discovery_dir / 'shelfmark_push_log.csv').name}`",
+                ]
+            )
+        if shelfmark_result.release_workflow_enabled:
+            readme_lines.extend(
+                [
+                    f"- Shelfmark release candidates: `{(discovery_dir / 'shelfmark_release_candidates.csv').name}`",
+                    f"- Shelfmark release candidates JSON: `{(discovery_dir / 'shelfmark_release_candidates.json').name}`",
+                    f"- Shelfmark selected releases: `{(discovery_dir / 'shelfmark_selected_releases.csv').name}`",
+                    f"- Shelfmark download log: `{(discovery_dir / 'shelfmark_download_log.csv').name}`",
+                ]
+            )
+        readme_lines.append(f"- Shelfmark summary: `{(discovery_dir / 'shelfmark_summary.md').name}`")
+    readme_path = _write_root_readme(output_dir, "Discovery", readme_lines)
 
-    return output_paths
+    return DiscoveryOutputPaths(
+        root=output_dir,
+        summary=discovery_dir / "summary.md",
+        readme=readme_path,
+        candidates=discovery_dir / "candidates.csv",
+        bookshelf_queue=bookshelf_queue_path,
+        bookshelf_queue_json=bookshelf_queue_json_path,
+        bookshelf_push_log=bookshelf_push_log_path,
+        bookshelf_summary=bookshelf_summary_path,
+        shelfmark_queue=shelfmark_queue_path,
+        shelfmark_queue_json=shelfmark_queue_json_path,
+        shelfmark_push_log=shelfmark_push_log_path,
+        shelfmark_release_candidates=shelfmark_release_candidates_path,
+        shelfmark_release_candidates_json=shelfmark_release_candidates_json_path,
+        shelfmark_selected_releases=shelfmark_selected_releases_path,
+        shelfmark_download_log=shelfmark_download_log_path,
+        shelfmark_summary=shelfmark_summary_path,
+    )
 
 
 def build_apply_outputs(
@@ -373,7 +537,7 @@ def build_apply_outputs(
     output_dir: Path,
     *,
     summary: Mapping[str, Any],
-) -> Dict[str, Path]:
+) -> ApplyOutputPaths:
     ensure_dir(output_dir)
     apply_dir = output_dir / "apply"
     ensure_dir(apply_dir)
@@ -441,20 +605,18 @@ def build_apply_outputs(
     )
     _write_summary(apply_dir / "summary.md", summary_lines)
 
-    readme_lines = [
-        "# Output overview",
-        "",
-        "## Apply",
-        f"- Summary: `{(apply_dir / 'summary.md').name}`",
-        f"- Apply log: `{(apply_dir / 'apply_log.csv').name}` — includes db_write_status, file_write_target, and file_write_status columns",
-        "",
-        "`run.log` remains in the root output directory for the full execution trace.",
-    ]
-    _write_summary(output_dir / "README.md", readme_lines)
+    readme_path = _write_root_readme(
+        output_dir,
+        "Apply",
+        [
+            f"- Summary: `{(apply_dir / 'summary.md').name}`",
+            f"- Apply log: `{(apply_dir / 'apply_log.csv').name}` — includes db_write_status, file_write_target, and file_write_status columns",
+        ],
+    )
 
-    return {
-        "root": output_dir,
-        "summary": apply_dir / "summary.md",
-        "apply_log": apply_dir / "apply_log.csv",
-        "readme": output_dir / "README.md",
-    }
+    return ApplyOutputPaths(
+        root=output_dir,
+        summary=apply_dir / "summary.md",
+        readme=readme_path,
+        apply_log=apply_dir / "apply_log.csv",
+    )

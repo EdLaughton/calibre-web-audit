@@ -431,16 +431,20 @@ def test_discovery_outputs_write_bookshelf_artifacts_with_stable_headers(tmp_pat
 
     output_paths = build_discovery_outputs(candidates, tmp_path, bookshelf_result=bookshelf_result)
 
-    assert output_paths["bookshelf_queue"].exists()
-    assert output_paths["bookshelf_queue_json"].exists()
-    assert output_paths["bookshelf_push_log"].exists()
-    assert output_paths["bookshelf_summary"].exists()
-    summary_text = output_paths["summary"].read_text(encoding="utf-8")
+    assert output_paths.bookshelf_queue is not None
+    assert output_paths.bookshelf_queue_json is not None
+    assert output_paths.bookshelf_push_log is not None
+    assert output_paths.bookshelf_summary is not None
+    assert output_paths.bookshelf_queue.exists()
+    assert output_paths.bookshelf_queue_json.exists()
+    assert output_paths.bookshelf_push_log.exists()
+    assert output_paths.bookshelf_summary.exists()
+    summary_text = output_paths.summary.read_text(encoding="utf-8")
     assert "## Bookshelf" in summary_text
 
-    with output_paths["bookshelf_queue"].open(newline="", encoding="utf-8") as handle:
+    with output_paths.bookshelf_queue.open(newline="", encoding="utf-8") as handle:
         queue_header = next(csv.reader(handle))
-    with output_paths["bookshelf_push_log"].open(newline="", encoding="utf-8") as handle:
+    with output_paths.bookshelf_push_log.open(newline="", encoding="utf-8") as handle:
         push_log_header = next(csv.reader(handle))
 
     assert queue_header[:6] == [

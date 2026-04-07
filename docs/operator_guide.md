@@ -58,8 +58,28 @@ Optional but useful:
 - `--author-aliases-json` for author alias normalization
 - `--ebook-meta-command` to point at a host `ebook-meta`
 - `--docker-ebook-meta-container` plus `--container-library-root` if `ebook-meta` lives in Docker
+- `--cwa-app-db` and/or `--cwa-dirs-json` to derive runtime paths from a Calibre-Web-Automated deployment
 
 If `ebook-meta` is unavailable, the tools still run, but metadata probing falls back to weaker EPUB/content extraction. That is acceptable for smoke checks, but for a real library you usually want a working `ebook-meta`.
+
+## CWA Compatibility
+
+The runtime layer can optionally derive `--library-root` and `--metadata-db` from Calibre-Web-Automated files:
+
+- `--cwa-app-db /config/app.db`
+- `--cwa-dirs-json /app/calibre-web-automated/dirs.json`
+- the flags are opt-in and leave default path handling unchanged when omitted
+- explicit `--library-root` and `--metadata-db` still override the derived values
+
+Resolution rules:
+
+- with split-library enabled in `app.db`:
+  - library root = `config_calibre_split_dir`
+  - metadata DB = `<config_calibre_dir>/metadata.db`
+- without split-library:
+  - library root = `dirs.json.calibre_library_dir` when `--cwa-dirs-json` is provided
+  - otherwise library root = `app.db.config_calibre_dir`
+  - metadata DB = `<library-root>/metadata.db`
 
 ## Path Defaults
 
@@ -84,7 +104,11 @@ If a legacy `/path/to/calibre-library/hardcover_cache.json` exists, it is import
    `actions.csv` is the full forensic action/review sheet.
    `write_plan.csv` is the full-library apply sheet and may include `keep_hardcover_id` confirmation rows plus rows that are intentionally unsafe to apply.
 3. Optionally run `discovery` and review `discovery/candidates.csv`.
-   If you are using the Bookshelf integration, review `discovery/bookshelf_queue.csv`, `discovery/bookshelf_push_log.csv`, and `discovery/bookshelf_summary.md`.
+   If you are using a downstream discovery integration, also review its queue and push-log artifacts:
+   `discovery/bookshelf_queue.csv`, `discovery/bookshelf_push_log.csv`, `discovery/bookshelf_summary.md`,
+   `discovery/shelfmark_queue.csv`, `discovery/shelfmark_push_log.csv`,
+   `discovery/shelfmark_release_candidates.csv`, `discovery/shelfmark_selected_releases.csv`,
+   `discovery/shelfmark_download_log.csv`, and `discovery/shelfmark_summary.md` as applicable.
 4. Run `apply --dry-run` first.
 5. Only rerun `apply` without `--dry-run` after checking the dry-run output.
 6. Only add `--include-calibre-title-author` when you intentionally want Calibre title/author mutation in addition to identifier writes.
@@ -98,6 +122,25 @@ Audit:
 HARDCOVER_TOKEN='your_raw_token_here' \
 hardcover-audit \
   --library-root /path/to/calibre-library
+```
+
+Audit against a standard CWA deployment:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-audit \
+  --cwa-app-db /config/app.db \
+  --cwa-dirs-json /app/calibre-web-automated/dirs.json
+```
+
+Apply dry-run against a CWA split-library deployment:
+
+```bash
+hardcover-apply \
+  --cwa-app-db /config/app.db \
+  --cwa-dirs-json /app/calibre-web-automated/dirs.json \
+  --write-plan /path/to/output/audit/write_plan.csv \
+  --dry-run
 ```
 
 Default audit logging is concise and progress-oriented. Use `--verbose` when you want per-book decision lines, and reserve `--debug-hardcover` for low-level Hardcover/cache troubleshooting.
@@ -175,6 +218,91 @@ hardcover-discovery \
   --bookshelf-root-folder /library/books \
   --bookshelf-quality-profile-id 1 \
   --bookshelf-metadata-profile-id 1
+```
+
+Discovery with Shelfmark queue export only:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --export-shelfmark
+```
+
+Discovery with Shelfmark dry-run request validation:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --push-shelfmark \
+  --shelfmark-url http://shelfmark.local:8084 \
+  --shelfmark-username YOUR_SHELFMARK_USERNAME \
+  --shelfmark-password YOUR_SHELFMARK_PASSWORD \
+  --dry-run
+```
+
+Discovery with live Shelfmark request submission:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --push-shelfmark \
+  --shelfmark-url http://shelfmark.local:8084 \
+  --shelfmark-username YOUR_SHELFMARK_USERNAME \
+  --shelfmark-password YOUR_SHELFMARK_PASSWORD \
+  --shelfmark-note "Queued from calibre-web-audit discovery shortlist"
+```
+
+Discovery with Shelfmark release export only:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --export-shelfmark-releases \
+  --shelfmark-url http://shelfmark.local:8084 \
+  --shelfmark-source libgen
+```
+
+Discovery with Shelfmark dry-run release search:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --export-shelfmark-releases \
+  --shelfmark-url http://shelfmark.local:8084 \
+  --shelfmark-source libgen \
+  --shelfmark-content-type ebook \
+  --dry-run
+```
+
+Discovery with Shelfmark dry-run queue/download:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --push-shelfmark-download \
+  --shelfmark-url http://shelfmark.local:8084 \
+  --shelfmark-source libgen \
+  --shelfmark-content-type ebook \
+  --dry-run
+```
+
+Discovery with live Shelfmark queue/download:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --push-shelfmark-download \
+  --shelfmark-url http://shelfmark.local:8084 \
+  --shelfmark-source libgen \
+  --shelfmark-content-type ebook \
+  --shelfmark-selection best
 ```
 
 Apply dry-run:
@@ -369,3 +497,96 @@ Limitations:
 - if the target metadata backend is not clearly Hardcover-backed, lookup depends on ISBN, ASIN, or title+author search quality
 - ambiguous Bookshelf matches are skipped instead of forced
 - `book` mode is the conservative default; `author` and `auto` are broader operator choices
+
+## Shelfmark Integration
+
+The Shelfmark integration also lives entirely on the `discovery` side. It does not change discovery ranking, shortlist/review/suppressed classification, or any `apply` semantics. It now exposes two separate workflows:
+
+- a request workflow for metadata-backed Shelfmark requests
+- a release workflow for concrete release search plus optional explicit download queueing
+
+Shared safety model:
+
+- default `shortlist-only` exports only `eligible_for_shortlist_boolean=True` rows
+- `safe-only` is stricter and keeps only the plain `shortlist` bucket
+- `all-approved` keeps all non-suppressed discovery rows
+- suppressed rows are never exported or pushed
+- queue/download is never attempted unless `--push-shelfmark-download` is explicitly set
+- the concrete release source is always operator-selected via `--shelfmark-source`
+
+Request workflow flags:
+
+- `--export-shelfmark`
+- `--push-shelfmark`
+- `--shelfmark-url`
+- `--shelfmark-username`
+- `--shelfmark-password`
+- optional `--shelfmark-note`
+- optional `--dry-run`
+
+Request workflow:
+
+1. `discovery` builds a Shelfmark queue from already-classified discovery rows.
+2. Live push authenticates with `POST /api/auth/login`.
+3. It checks `GET /api/request-policy`.
+4. Live request submission only proceeds when:
+   - `requests_enabled=true`
+   - the ebook request policy resolves to `request_book`
+5. Queue rows are submitted as Hardcover-backed metadata book requests with:
+   - `provider=hardcover`
+   - `provider_id=<hardcover-id>`
+   - `source=*`
+   - `content_type=ebook`
+   - `request_level=book`
+
+Release workflow flags:
+
+- `--export-shelfmark-releases`
+- `--push-shelfmark-download`
+- `--shelfmark-url`
+- `--shelfmark-source`
+- optional `--shelfmark-content-type`
+- optional `--shelfmark-selection best|most_seeders|first|largest|preferred-format`
+- optional `--shelfmark-format-keywords epub,kepub,pdf,...`
+- optional `--shelfmark-min-seeders N`
+- optional `--shelfmark-username`
+- optional `--shelfmark-password`
+- optional `--dry-run`
+
+Release workflow:
+
+1. `discovery` searches `GET /api/releases` using the explicit source and content type.
+2. It prefers the Hardcover-backed lookup route first:
+   - `provider=hardcover`
+   - `book_id=<hardcover-id>`
+3. If that finds no releases, it falls back to a title+author search against the same source.
+4. Returned releases are filtered for explicit source match, content type, format keywords, minimum seeders, and concrete `source` + `source_id`.
+5. One accepted release is selected with the explicit rule from `--shelfmark-selection`.
+6. Only `--push-shelfmark-download` calls `POST /api/releases/download`.
+   Otherwise the selected release is exported and logged without queueing anything.
+
+Selection rules:
+
+- `first`: first accepted release in Shelfmark response order
+- `most_seeders`: highest seeders, then larger size, then stable response order
+- `largest`: largest `size_bytes`, then higher seeders, then stable response order
+- `preferred-format`: earliest matching keyword from `--shelfmark-format-keywords`, then higher seeders, then larger size
+- `best`: format-keyword priority when keywords are provided, otherwise a conservative built-in format priority, then higher seeders, then larger size
+
+Artifacts:
+
+- `discovery/shelfmark_queue.csv`
+- `discovery/shelfmark_queue.json`
+- `discovery/shelfmark_push_log.csv`
+- `discovery/shelfmark_release_candidates.csv`
+- `discovery/shelfmark_release_candidates.json`
+- `discovery/shelfmark_selected_releases.csv`
+- `discovery/shelfmark_download_log.csv`
+- `discovery/shelfmark_summary.md`
+
+Limitations:
+
+- the request workflow still depends on Shelfmark’s authenticated request API
+- the release workflow may run without credentials on a no-auth Shelfmark instance, or with username/password when the instance requires auth
+- the release workflow only queues downloads when Shelfmark returns a concrete release with `source` and `source_id`
+- if all returned releases fail source/content-type/format/min-seeder checks, the row is exported and logged as skipped rather than queued
