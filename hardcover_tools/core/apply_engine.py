@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
+from .command_results import ApplyCommandResult
+from .command_runtime import CommandRuntimeContext, open_command_runtime
 from .config import ApplyCliConfig
 from .file_metadata_writer import (
     FileMutationSession,
@@ -25,8 +27,6 @@ from .identifiers import (
     extract_numeric_id,
 )
 from .output import build_apply_outputs
-from .runtime_io import TeeStream
-from .runtime_support import resolve_runtime_paths
 from .text_normalization import split_author_like_string
 
 SUPPORTED_APPLY_ACTIONS = {
@@ -236,6 +236,20 @@ class DesiredMetadata:
     hardcover_id: str
     hardcover_slug: str
     hardcover_edition_id: str
+
+
+@dataclass(frozen=True)
+class ApplySelectionResult:
+    selected_rows: list[ApplyPlanRow]
+    apply_log_rows: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class ApplyTransactionResult:
+    apply_log_rows: list[dict[str, Any]]
+    attempted_count: int
+    transaction_status: str
+    exit_code: int
 
 
 def load_apply_plan(path: Path) -> list[ApplyPlanRow]:
@@ -621,200 +635,251 @@ def _attempt_row_apply(
     return log_row
 
 
-def run_apply(config: ApplyCliConfig) -> int:
-    runtime_paths = resolve_runtime_paths(
-        library_root=config.library_root,
-        metadata_db=config.metadata_db,
-        output_dir=config.output_dir,
-        cache_path=None,
+def _print_apply_setup(
+    context: CommandRuntimeContext,
+    config: ApplyCliConfig,
+    *,
+    write_plan_path: Path,
+    input_row_count: int,
+) -> None:
+    runtime_paths = context.runtime_paths
+    print(f"Using library root: {runtime_paths.library_root}")
+    print(f"Using metadata DB: {runtime_paths.metadata_db}")
+    if runtime_paths.resolution_source != "cli":
+        print(f"Runtime source: {runtime_paths.resolution_source}")
+    print(f"Using write plan: {write_plan_path}")
+    print(f"Writing outputs to: {runtime_paths.output_dir}")
+    print(f"Writing log to: {runtime_paths.log_path}")
+    print(
+        "Apply mode: "
+        f"safe_only={'yes' if config.apply_safe_only else 'no'} | "
+        f"identifiers_only={'yes' if config.include_identifiers_only else 'no'} | "
+        f"include_calibre_title_author={'yes' if config.include_calibre_title_author else 'no'} | "
+        f"write_db={'yes' if config.write_db else 'no'} | "
+        f"write_sidecar_opf={'yes' if config.write_sidecar_opf else 'no'} | "
+        f"write_epub_opf={'yes' if config.write_epub_opf else 'no'} | "
+        f"prefer_sidecar_opf={'yes' if config.prefer_sidecar_opf else 'no'} | "
+        f"dry_run={'yes' if config.dry_run else 'no'}"
+    )
+    if config.apply_actions:
+        print(f"Action filter: {', '.join(config.apply_actions)}")
+    if config.limit is not None:
+        print(f"Apply row limit: {config.limit}")
+    print(f"Loaded {input_row_count} write-plan rows")
+
+
+def _select_apply_rows(plan_rows: Sequence[ApplyPlanRow], config: ApplyCliConfig) -> ApplySelectionResult:
+    selected_rows: list[ApplyPlanRow] = []
+    apply_log_rows: list[dict[str, Any]] = []
+    requested_actions = set(config.apply_actions)
+
+    for plan_row in plan_rows:
+        if plan_row.is_manual_review:
+            log_row = _base_log_row(plan_row)
+            log_row["status"] = "skipped_manual_review"
+            log_row["status_reason"] = "manual-review style actions are never applied by default"
+            apply_log_rows.append(log_row)
+            continue
+        if plan_row.action_type not in SUPPORTED_APPLY_ACTIONS:
+            log_row = _base_log_row(plan_row)
+            log_row["status"] = "skipped_unsupported_action"
+            log_row["status_reason"] = "action is not supported by the Stage 3 apply engine"
+            apply_log_rows.append(log_row)
+            continue
+        if requested_actions and plan_row.action_type not in requested_actions:
+            log_row = _base_log_row(plan_row)
+            log_row["status"] = "skipped_action_filter"
+            log_row["status_reason"] = "action did not match --apply-actions"
+            apply_log_rows.append(log_row)
+            continue
+        if config.apply_safe_only and not plan_row.safe_to_apply:
+            log_row = _base_log_row(plan_row)
+            log_row["status"] = "skipped_not_safe"
+            log_row["status_reason"] = plan_row.safe_to_apply_reason or "row was not marked safe_to_apply"
+            apply_log_rows.append(log_row)
+            continue
+        selected_rows.append(plan_row)
+
+    limited_rows = selected_rows[: config.limit] if config.limit is not None else selected_rows
+    for plan_row in selected_rows[len(limited_rows) :]:
+        log_row = _base_log_row(plan_row)
+        log_row["status"] = "skipped_limit"
+        log_row["status_reason"] = "row was outside the requested --limit window"
+        apply_log_rows.append(log_row)
+
+    return ApplySelectionResult(selected_rows=limited_rows, apply_log_rows=apply_log_rows)
+
+
+def _execute_apply_transaction(
+    runtime_paths,
+    selected_rows: Sequence[ApplyPlanRow],
+    starting_apply_log_rows: Sequence[Mapping[str, Any]],
+    *,
+    config: ApplyCliConfig,
+) -> ApplyTransactionResult:
+    apply_log_rows = [dict(row) for row in starting_apply_log_rows]
+    transaction_status = "not_started"
+    exit_code = 0
+    attempted_count = 0
+
+    with _open_metadata_connection(runtime_paths.metadata_db) as connection:
+        attempted_logs: list[dict[str, Any]] = []
+        file_session = FileMutationSession()
+        try:
+            if config.write_db:
+                connection.execute("BEGIN IMMEDIATE")
+                transaction_status = "in_progress"
+            else:
+                transaction_status = "files_only_in_progress"
+            for plan_row in selected_rows:
+                attempted_count += 1
+                attempted_log = _attempt_row_apply(
+                    connection,
+                    runtime_paths.library_root,
+                    plan_row,
+                    config=config,
+                    file_session=file_session,
+                )
+                attempted_logs.append(attempted_log)
+            if config.dry_run:
+                if config.write_db:
+                    connection.rollback()
+                file_session.restore_all()
+                transaction_status = "rolled_back_dry_run"
+                for log_row in attempted_logs:
+                    if log_row["db_write_status"] == "applied":
+                        log_row["db_write_status"] = "would_apply"
+                        log_row["db_write_reason"] = "dry-run would update metadata.db"
+                    if log_row["file_write_status"] == "applied":
+                        log_row["file_write_status"] = "would_apply"
+                        log_row["file_write_reason"] = "dry-run would update file metadata"
+                    elif log_row["file_write_status"] == "no_changes":
+                        log_row["file_write_reason"] = "dry-run verified file metadata already matched"
+                    _refresh_overall_status(log_row)
+                apply_log_rows.extend(attempted_logs)
+            else:
+                if config.write_db:
+                    connection.commit()
+                    transaction_status = "committed"
+                else:
+                    transaction_status = "completed_files_only"
+                apply_log_rows.extend(attempted_logs)
+        except Exception as exc:
+            if config.write_db:
+                connection.rollback()
+            try:
+                file_session.restore_all()
+            except Exception as restore_exc:
+                exc = RuntimeError(f"{exc}; file rollback failed: {restore_exc}")
+            transaction_status = "rolled_back_error"
+            exit_code = 1
+            for log_row in attempted_logs:
+                if log_row["db_write_status"] == "applied":
+                    log_row["db_write_status"] = "rolled_back"
+                    log_row["db_write_reason"] = "metadata.db transaction rolled back after a later row failed"
+                if log_row["file_write_status"] == "applied":
+                    log_row["file_write_status"] = "rolled_back"
+                    log_row["file_write_reason"] = "file metadata restored after a later row failed"
+                _refresh_overall_status(log_row)
+            apply_log_rows.extend(attempted_logs)
+            failing_log = _base_log_row(
+                selected_rows[min(attempted_count - 1, len(selected_rows) - 1)]
+            ) if selected_rows else None
+            if failing_log is not None:
+                failing_log["status"] = "error"
+                failing_log["status_reason"] = str(exc)
+                failing_log["db_write_requested"] = config.write_db
+                failing_log["db_write_status"] = "error" if config.write_db else "skipped_mode"
+                failing_log["db_write_reason"] = (
+                    str(exc) if config.write_db else "files-only mode skipped metadata.db writes"
+                )
+                failing_log["file_write_requested"] = bool(config.write_sidecar_opf or config.write_epub_opf)
+                failing_log["file_write_status"] = "error" if failing_log["file_write_requested"] else "not_requested"
+                failing_log["file_write_reason"] = str(exc) if failing_log["file_write_requested"] else "file metadata writes not enabled"
+                apply_log_rows.append(failing_log)
+            print(f"ERROR: apply transaction failed: {exc}", file=sys.stderr)
+        finally:
+            file_session.cleanup()
+
+    return ApplyTransactionResult(
+        apply_log_rows=apply_log_rows,
+        attempted_count=attempted_count,
+        transaction_status=transaction_status,
+        exit_code=exit_code,
     )
 
-    try:
-        write_plan_path = _resolve_write_plan_path(runtime_paths.library_root, config.write_plan)
-        plan_rows = load_apply_plan(write_plan_path)
-    except (FileNotFoundError, OSError, csv.Error) as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 2
 
-    original_stdout = sys.stdout
-    original_stderr = sys.stderr
-    with runtime_paths.log_path.open("w", encoding="utf-8") as log_handle:
+def _execute_apply(
+    context: CommandRuntimeContext,
+    config: ApplyCliConfig,
+    *,
+    write_plan_path: Path,
+    plan_rows: Sequence[ApplyPlanRow],
+) -> ApplyCommandResult:
+    _print_apply_setup(context, config, write_plan_path=write_plan_path, input_row_count=len(plan_rows))
+    selection = _select_apply_rows(plan_rows, config)
+    transaction = _execute_apply_transaction(
+        context.runtime_paths,
+        selection.selected_rows,
+        selection.apply_log_rows,
+        config=config,
+    )
+
+    outputs = build_apply_outputs(
+        transaction.apply_log_rows,
+        context.runtime_paths.output_dir,
+        summary={
+            "input_rows": len(plan_rows),
+            "selected_rows": len(selection.selected_rows),
+            "attempted_rows": sum(
+                1 for row in transaction.apply_log_rows if str(row.get("status") or "") in ATTEMPTED_STATUSES
+            ),
+            "transaction_status": transaction.transaction_status,
+            "dry_run": config.dry_run,
+            "metadata_db_path": str(context.runtime_paths.metadata_db),
+            "write_plan_path": str(write_plan_path),
+            "apply_safe_only": config.apply_safe_only,
+            "include_identifiers_only": config.include_identifiers_only,
+            "include_calibre_title_author": config.include_calibre_title_author,
+            "write_db": config.write_db,
+            "write_sidecar_opf": config.write_sidecar_opf,
+            "write_epub_opf": config.write_epub_opf,
+            "prefer_sidecar_opf": config.prefer_sidecar_opf,
+            "apply_actions_display": ", ".join(config.apply_actions) if config.apply_actions else "",
+            "limit_display": str(config.limit) if config.limit is not None else "",
+        },
+    )
+
+    return ApplyCommandResult(
+        outputs=outputs,
+        selected_row_count=len(selection.selected_rows),
+        attempted_row_count=transaction.attempted_count,
+        transaction_status=transaction.transaction_status,
+        exit_code=transaction.exit_code,
+    )
+
+
+def _print_apply_result(result: ApplyCommandResult) -> None:
+    print(f"Selected rows for apply: {result.selected_row_count}")
+    print(f"Attempted rows: {result.attempted_row_count}")
+    print(f"Transaction outcome: {result.transaction_status}")
+    print(f"Apply summary: {result.outputs.summary}")
+    print(f"Apply log: {result.outputs.apply_log}")
+
+
+def run_apply(config: ApplyCliConfig) -> int:
+    with open_command_runtime(config, command_name="apply") as context:
         try:
-            sys.stdout = TeeStream(original_stdout, log_handle)
-            sys.stderr = TeeStream(original_stderr, log_handle)
-
-            print(f"Using library root: {runtime_paths.library_root}")
-            print(f"Using metadata DB: {runtime_paths.metadata_db}")
-            print(f"Using write plan: {write_plan_path}")
-            print(f"Writing outputs to: {runtime_paths.output_dir}")
-            print(f"Writing log to: {runtime_paths.log_path}")
-            print(
-                "Apply mode: "
-                f"safe_only={'yes' if config.apply_safe_only else 'no'} | "
-                f"identifiers_only={'yes' if config.include_identifiers_only else 'no'} | "
-                f"include_calibre_title_author={'yes' if config.include_calibre_title_author else 'no'} | "
-                f"write_db={'yes' if config.write_db else 'no'} | "
-                f"write_sidecar_opf={'yes' if config.write_sidecar_opf else 'no'} | "
-                f"write_epub_opf={'yes' if config.write_epub_opf else 'no'} | "
-                f"prefer_sidecar_opf={'yes' if config.prefer_sidecar_opf else 'no'} | "
-                f"dry_run={'yes' if config.dry_run else 'no'}"
-            )
-            if config.apply_actions:
-                print(f"Action filter: {', '.join(config.apply_actions)}")
-            if config.limit is not None:
-                print(f"Apply row limit: {config.limit}")
-            print(f"Loaded {len(plan_rows)} write-plan rows")
-
-            selected_rows: list[ApplyPlanRow] = []
-            apply_log_rows: list[dict[str, Any]] = []
-            requested_actions = set(config.apply_actions)
-
-            for plan_row in plan_rows:
-                if plan_row.is_manual_review:
-                    log_row = _base_log_row(plan_row)
-                    log_row["status"] = "skipped_manual_review"
-                    log_row["status_reason"] = "manual-review style actions are never applied by default"
-                    apply_log_rows.append(log_row)
-                    continue
-                if plan_row.action_type not in SUPPORTED_APPLY_ACTIONS:
-                    log_row = _base_log_row(plan_row)
-                    log_row["status"] = "skipped_unsupported_action"
-                    log_row["status_reason"] = "action is not supported by the Stage 3 apply engine"
-                    apply_log_rows.append(log_row)
-                    continue
-                if requested_actions and plan_row.action_type not in requested_actions:
-                    log_row = _base_log_row(plan_row)
-                    log_row["status"] = "skipped_action_filter"
-                    log_row["status_reason"] = "action did not match --apply-actions"
-                    apply_log_rows.append(log_row)
-                    continue
-                if config.apply_safe_only and not plan_row.safe_to_apply:
-                    log_row = _base_log_row(plan_row)
-                    log_row["status"] = "skipped_not_safe"
-                    log_row["status_reason"] = plan_row.safe_to_apply_reason or "row was not marked safe_to_apply"
-                    apply_log_rows.append(log_row)
-                    continue
-                selected_rows.append(plan_row)
-
-            limited_rows = selected_rows[: config.limit] if config.limit is not None else selected_rows
-            skipped_due_to_limit = selected_rows[len(limited_rows) :]
-            for plan_row in skipped_due_to_limit:
-                log_row = _base_log_row(plan_row)
-                log_row["status"] = "skipped_limit"
-                log_row["status_reason"] = "row was outside the requested --limit window"
-                apply_log_rows.append(log_row)
-
-            transaction_status = "not_started"
-            exit_code = 0
-            attempted_count = 0
-            with _open_metadata_connection(runtime_paths.metadata_db) as connection:
-                attempted_logs: list[dict[str, Any]] = []
-                file_session = FileMutationSession()
-                try:
-                    if config.write_db:
-                        connection.execute("BEGIN IMMEDIATE")
-                        transaction_status = "in_progress"
-                    else:
-                        transaction_status = "files_only_in_progress"
-                    for plan_row in limited_rows:
-                        attempted_count += 1
-                        attempted_log = _attempt_row_apply(
-                            connection,
-                            runtime_paths.library_root,
-                            plan_row,
-                            config=config,
-                            file_session=file_session,
-                        )
-                        attempted_logs.append(attempted_log)
-                    if config.dry_run:
-                        if config.write_db:
-                            connection.rollback()
-                        file_session.restore_all()
-                        transaction_status = "rolled_back_dry_run"
-                        for log_row in attempted_logs:
-                            if log_row["db_write_status"] == "applied":
-                                log_row["db_write_status"] = "would_apply"
-                                log_row["db_write_reason"] = "dry-run would update metadata.db"
-                            if log_row["file_write_status"] == "applied":
-                                log_row["file_write_status"] = "would_apply"
-                                log_row["file_write_reason"] = "dry-run would update file metadata"
-                            elif log_row["file_write_status"] == "no_changes":
-                                log_row["file_write_reason"] = "dry-run verified file metadata already matched"
-                            _refresh_overall_status(log_row)
-                        apply_log_rows.extend(attempted_logs)
-                    else:
-                        if config.write_db:
-                            connection.commit()
-                            transaction_status = "committed"
-                        else:
-                            transaction_status = "completed_files_only"
-                        apply_log_rows.extend(attempted_logs)
-                except Exception as exc:
-                    if config.write_db:
-                        connection.rollback()
-                    try:
-                        file_session.restore_all()
-                    except Exception as restore_exc:
-                        exc = RuntimeError(f"{exc}; file rollback failed: {restore_exc}")
-                    transaction_status = "rolled_back_error"
-                    exit_code = 1
-                    for log_row in attempted_logs:
-                        if log_row["db_write_status"] == "applied":
-                            log_row["db_write_status"] = "rolled_back"
-                            log_row["db_write_reason"] = "metadata.db transaction rolled back after a later row failed"
-                        if log_row["file_write_status"] == "applied":
-                            log_row["file_write_status"] = "rolled_back"
-                            log_row["file_write_reason"] = "file metadata restored after a later row failed"
-                        _refresh_overall_status(log_row)
-                    apply_log_rows.extend(attempted_logs)
-                    failing_log = _base_log_row(
-                        limited_rows[min(attempted_count - 1, len(limited_rows) - 1)]
-                    ) if limited_rows else None
-                    if failing_log is not None:
-                        failing_log["status"] = "error"
-                        failing_log["status_reason"] = str(exc)
-                        failing_log["db_write_requested"] = config.write_db
-                        failing_log["db_write_status"] = "error" if config.write_db else "skipped_mode"
-                        failing_log["db_write_reason"] = str(exc) if config.write_db else "files-only mode skipped metadata.db writes"
-                        failing_log["file_write_requested"] = bool(config.write_sidecar_opf or config.write_epub_opf)
-                        failing_log["file_write_status"] = "error" if failing_log["file_write_requested"] else "not_requested"
-                        failing_log["file_write_reason"] = str(exc) if failing_log["file_write_requested"] else "file metadata writes not enabled"
-                        apply_log_rows.append(failing_log)
-                    print(f"ERROR: apply transaction failed: {exc}", file=sys.stderr)
-                finally:
-                    file_session.cleanup()
-
-            output_paths = build_apply_outputs(
-                apply_log_rows,
-                runtime_paths.output_dir,
-                summary={
-                    "input_rows": len(plan_rows),
-                    "selected_rows": len(limited_rows),
-                    "attempted_rows": sum(
-                        1 for row in apply_log_rows if str(row.get("status") or "") in ATTEMPTED_STATUSES
-                    ),
-                    "transaction_status": transaction_status,
-                    "dry_run": config.dry_run,
-                    "metadata_db_path": str(runtime_paths.metadata_db),
-                    "write_plan_path": str(write_plan_path),
-                    "apply_safe_only": config.apply_safe_only,
-                    "include_identifiers_only": config.include_identifiers_only,
-                    "include_calibre_title_author": config.include_calibre_title_author,
-                    "write_db": config.write_db,
-                    "write_sidecar_opf": config.write_sidecar_opf,
-                    "write_epub_opf": config.write_epub_opf,
-                    "prefer_sidecar_opf": config.prefer_sidecar_opf,
-                    "apply_actions_display": ", ".join(config.apply_actions) if config.apply_actions else "",
-                    "limit_display": str(config.limit) if config.limit is not None else "",
-                },
-            )
-
-            print(f"Selected rows for apply: {len(limited_rows)}")
-            print(f"Attempted rows: {attempted_count}")
-            print(f"Transaction outcome: {transaction_status}")
-            print(f"Apply summary: {output_paths['summary']}")
-            print(f"Apply log: {output_paths['apply_log']}")
-            return exit_code
-        finally:
-            sys.stdout = original_stdout
-            sys.stderr = original_stderr
+            write_plan_path = _resolve_write_plan_path(context.runtime_paths.library_root, config.write_plan)
+            plan_rows = load_apply_plan(write_plan_path)
+        except (FileNotFoundError, OSError, csv.Error) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+        result = _execute_apply(
+            context,
+            config,
+            write_plan_path=write_plan_path,
+            plan_rows=plan_rows,
+        )
+        _print_apply_result(result)
+        return result.exit_code

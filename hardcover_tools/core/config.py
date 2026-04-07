@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence, Tuple
@@ -13,6 +14,18 @@ from .runtime_defaults import (
     DEFAULT_SEARCH_CACHE_TTL_HOURS,
     HARDCOVER_DEFAULT_USER_AGENT,
 )
+
+
+def _runtime_path_config_kwargs(namespace: argparse.Namespace) -> dict[str, object]:
+    return {
+        "library_root": Path(namespace.library_root),
+        "metadata_db": Path(namespace.metadata_db) if namespace.metadata_db else None,
+        "output_dir": Path(namespace.output_dir) if namespace.output_dir else None,
+        "cwa_app_db": Path(namespace.cwa_app_db) if getattr(namespace, "cwa_app_db", None) else None,
+        "cwa_dirs_json": Path(namespace.cwa_dirs_json) if getattr(namespace, "cwa_dirs_json", None) else None,
+        "library_root_explicit": bool(getattr(namespace, "_library_root_explicit", False)),
+        "metadata_db_explicit": bool(getattr(namespace, "_metadata_db_explicit", False)),
+    }
 
 
 @dataclass
@@ -39,13 +52,15 @@ class RuntimeCliConfig:
     edition_cache_ttl_hours: float
     progress_every: int
     debug_hardcover: bool
+    cwa_app_db: Optional[Path] = None
+    cwa_dirs_json: Optional[Path] = None
+    library_root_explicit: bool = False
+    metadata_db_explicit: bool = False
 
     @classmethod
     def from_namespace(cls, namespace: argparse.Namespace) -> "RuntimeCliConfig":
         return cls(
-            library_root=Path(namespace.library_root),
-            metadata_db=Path(namespace.metadata_db) if namespace.metadata_db else None,
-            output_dir=Path(namespace.output_dir) if namespace.output_dir else None,
+            **_runtime_path_config_kwargs(namespace),
             cache_path=Path(namespace.cache_path) if namespace.cache_path else None,
             limit=namespace.limit,
             verbose=bool(namespace.verbose),
@@ -130,15 +145,17 @@ class ApplyCliConfig:
     write_sidecar_opf: bool = False
     write_epub_opf: bool = False
     prefer_sidecar_opf: bool = True
+    cwa_app_db: Optional[Path] = None
+    cwa_dirs_json: Optional[Path] = None
+    library_root_explicit: bool = False
+    metadata_db_explicit: bool = False
 
     @classmethod
     def from_namespace(cls, namespace: argparse.Namespace) -> "ApplyCliConfig":
         write_sidecar_opf = bool(namespace.write_sidecar_opf or namespace.write_ebook_metadata)
         write_epub_opf = bool(namespace.write_epub_opf or namespace.write_ebook_metadata)
         return cls(
-            library_root=Path(namespace.library_root),
-            metadata_db=Path(namespace.metadata_db) if namespace.metadata_db else None,
-            output_dir=Path(namespace.output_dir) if namespace.output_dir else None,
+            **_runtime_path_config_kwargs(namespace),
             write_plan=Path(namespace.write_plan) if namespace.write_plan else None,
             limit=namespace.limit,
             dry_run=bool(namespace.dry_run),
@@ -159,7 +176,22 @@ class ApplyCliConfig:
         )
 
 
-def _add_shared_runtime_args(parser: argparse.ArgumentParser) -> None:
+def _add_cwa_runtime_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--cwa-app-db",
+        type=Path,
+        default=None,
+        help="Opt-in CWA compatibility: resolve library and metadata.db paths from a Calibre-Web-Automated app.db, including split-library mode.",
+    )
+    parser.add_argument(
+        "--cwa-dirs-json",
+        type=Path,
+        default=None,
+        help="Opt-in CWA compatibility: resolve the Calibre library root from a Calibre-Web-Automated dirs.json file.",
+    )
+
+
+def _add_shared_path_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--library-root",
         type=Path,
@@ -173,6 +205,11 @@ def _add_shared_runtime_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Root output directory. Defaults to a timestamped folder under --library-root.",
     )
+    _add_cwa_runtime_args(parser)
+
+
+def _add_shared_runtime_args(parser: argparse.ArgumentParser) -> None:
+    _add_shared_path_args(parser)
     parser.add_argument(
         "--cache-path",
         type=Path,
@@ -290,19 +327,7 @@ def build_apply_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Apply approved Hardcover identifier and optional calibre metadata updates from an audit write plan",
     )
-    parser.add_argument(
-        "--library-root",
-        type=Path,
-        default=Path("."),
-        help="Calibre library root containing metadata.db",
-    )
-    parser.add_argument("--metadata-db", type=Path, default=None)
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=None,
-        help="Root output directory. Defaults to a timestamped folder under --library-root.",
-    )
+    _add_shared_path_args(parser)
     parser.add_argument(
         "--write-plan",
         type=Path,
@@ -378,15 +403,30 @@ def build_apply_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _argv_contains_option(argv: Sequence[str], option: str) -> bool:
+    return option in argv or any(str(arg).startswith(f"{option}=") for arg in argv)
+
+
+def _parse_with_runtime_explicit_flags(
+    parser: argparse.ArgumentParser,
+    argv: Optional[Sequence[str]],
+) -> argparse.Namespace:
+    argv_list = list(argv) if argv is not None else list(sys.argv[1:])
+    namespace = parser.parse_args(argv_list)
+    namespace._library_root_explicit = _argv_contains_option(argv_list, "--library-root")
+    namespace._metadata_db_explicit = _argv_contains_option(argv_list, "--metadata-db")
+    return namespace
+
+
 def parse_audit_args(argv: Optional[Sequence[str]] = None) -> AuditCliConfig:
     parser = build_audit_parser()
-    namespace = parser.parse_args(argv)
+    namespace = _parse_with_runtime_explicit_flags(parser, argv)
     return AuditCliConfig.from_namespace(namespace)
 
 
 def parse_discovery_args(argv: Optional[Sequence[str]] = None) -> DiscoveryCliConfig:
     parser = build_discovery_parser()
-    namespace = parser.parse_args(argv)
+    namespace = _parse_with_runtime_explicit_flags(parser, argv)
     if namespace.dry_run and not (namespace.export_bookshelf or namespace.push_bookshelf):
         parser.error("--dry-run requires --export-bookshelf or --push-bookshelf")
     if namespace.push_bookshelf:
@@ -405,7 +445,7 @@ def parse_discovery_args(argv: Optional[Sequence[str]] = None) -> DiscoveryCliCo
 
 def parse_apply_args(argv: Optional[Sequence[str]] = None) -> ApplyCliConfig:
     parser = build_apply_parser()
-    namespace = parser.parse_args(argv)
+    namespace = _parse_with_runtime_explicit_flags(parser, argv)
     file_write_requested = bool(
         namespace.write_ebook_metadata or namespace.write_sidecar_opf or namespace.write_epub_opf
     )

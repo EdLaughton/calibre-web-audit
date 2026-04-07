@@ -86,8 +86,25 @@ Use the raw token only. Do not prefix it with `Bearer `.
 - `--cache-path` for the Hardcover cache database
 - `--author-aliases-json` for author normalization aliases
 - `--ebook-meta-command` or `--docker-ebook-meta-container` when ebook metadata extraction needs an explicit tool path/container
+- `--cwa-app-db` and/or `--cwa-dirs-json` for opt-in Calibre-Web-Automated runtime resolution
 
 If `ebook-meta` is unavailable, the tools still run, but metadata probing falls back to weaker EPUB/ZIP/content extraction paths. For real-library audit quality, a working `ebook-meta` on the host or in the configured Docker container is strongly preferred.
+
+### Optional CWA compatibility
+
+`audit`, `discovery`, and `apply` can optionally resolve their effective `--library-root` and `--metadata-db` from Calibre-Web-Automated runtime files.
+
+- `--cwa-app-db /config/app.db`
+- `--cwa-dirs-json /app/calibre-web-automated/dirs.json`
+- the flags are opt-in and do nothing unless you pass them
+- explicit `--library-root` and `--metadata-db` still win
+- when CWA split-library mode is enabled in `app.db`, the tools use:
+  - `config_calibre_split_dir` as the library root
+  - `<config_calibre_dir>/metadata.db` as the metadata DB
+- when split-library mode is not enabled:
+  - `dirs.json.calibre_library_dir` is preferred for the library root when available
+  - otherwise `app.db.config_calibre_dir` is used
+  - the metadata DB defaults to `<library-root>/metadata.db`
 
 ## Runtime Defaults
 
@@ -149,6 +166,25 @@ Example audit:
 HARDCOVER_TOKEN='your_raw_token_here' \
 hardcover-audit \
   --library-root /path/to/calibre-library
+```
+
+Example audit against a standard CWA deployment:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-audit \
+  --cwa-app-db /config/app.db \
+  --cwa-dirs-json /app/calibre-web-automated/dirs.json
+```
+
+Example apply against a CWA split-library deployment:
+
+```bash
+hardcover-apply \
+  --cwa-app-db /config/app.db \
+  --cwa-dirs-json /app/calibre-web-automated/dirs.json \
+  --write-plan /path/to/output/audit/write_plan.csv \
+  --dry-run
 ```
 
 Audit logging defaults to compact phase/progress summaries. Add `--verbose` for per-book decision lines, and add `--debug-hardcover` only when you need low-level Hardcover HTTP/cache chatter.

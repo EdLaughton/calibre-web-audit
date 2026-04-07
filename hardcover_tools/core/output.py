@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Sequence
+from typing import Any, Iterable, List, Mapping, Sequence
 
 from .audit_insights import (
     build_metadata_probe_rollup,
@@ -69,9 +70,44 @@ AUDIT_OPERATOR_COLUMNS = [
 ]
 
 
+@dataclass(frozen=True)
+class CommandOutputPaths:
+    root: Path
+    summary: Path
+    readme: Path
+
+
+@dataclass(frozen=True)
+class AuditOutputPaths(CommandOutputPaths):
+    actions_operator: Path
+    actions: Path
+    write_plan: Path
+
+
+@dataclass(frozen=True)
+class DiscoveryOutputPaths(CommandOutputPaths):
+    candidates: Path
+    bookshelf_queue: Path | None = None
+    bookshelf_queue_json: Path | None = None
+    bookshelf_push_log: Path | None = None
+    bookshelf_summary: Path | None = None
+
+
+@dataclass(frozen=True)
+class ApplyOutputPaths(CommandOutputPaths):
+    apply_log: Path
+
+
 def _write_summary(path: Path, lines: Iterable[str]) -> None:
     ensure_dir(path.parent)
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def _write_root_readme(output_dir: Path, section_name: str, lines: Sequence[str]) -> Path:
+    readme_lines = ["# Output overview", "", f"## {section_name}", *lines, "", "`run.log` remains in the root output directory for the full execution trace."]
+    path = output_dir / "README.md"
+    _write_summary(path, readme_lines)
+    return path
 
 
 def _enrich_write_plan_rows(rows: Sequence[Any], write_plan: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -97,8 +133,8 @@ def _enrich_write_plan_rows(rows: Sequence[Any], write_plan: Sequence[Mapping[st
     return enriched_rows
 
 
-def _build_actions_operator_rows(audit_actions: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
-    output: List[Dict[str, Any]] = []
+def _build_actions_operator_rows(audit_actions: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
     for row in audit_actions:
         metadata_probe_warning, metadata_probe_details = metadata_probe_diagnostic(row)
         operator_row = {
@@ -152,7 +188,7 @@ def _build_actions_operator_rows(audit_actions: Sequence[Mapping[str, Any]]) -> 
     return output
 
 
-def build_audit_outputs(rows: Sequence[Any], output_dir: Path) -> Dict[str, Path]:
+def build_audit_outputs(rows: Sequence[Any], output_dir: Path) -> AuditOutputPaths:
     ensure_dir(output_dir)
     audit_dir = output_dir / "audit"
     ensure_dir(audit_dir)
@@ -240,27 +276,25 @@ def build_audit_outputs(rows: Sequence[Any], output_dir: Path) -> Dict[str, Path
     )
     _write_summary(audit_dir / "summary.md", summary_lines)
 
-    readme_lines = [
-        "# Output overview",
-        "",
-        "## Audit",
-        f"- Summary: `{(audit_dir / 'summary.md').name}`",
-        f"- Operator review sheet: `{(audit_dir / 'actions_operator.csv').name}` — compact triage-first layout derived from the action rows",
-        f"- Actions: `{(audit_dir / 'actions.csv').name}` — prioritized non-keep audit rows and review rows",
-        f"- Write plan: `{(audit_dir / 'write_plan.csv').name}` — full-library apply sheet; review `safe_to_apply_boolean` and `action_type` before apply",
-        "",
-        "`run.log` remains in the root output directory for the full execution trace.",
-    ]
-    _write_summary(output_dir / "README.md", readme_lines)
+    readme_path = _write_root_readme(
+        output_dir,
+        "Audit",
+        [
+            f"- Summary: `{(audit_dir / 'summary.md').name}`",
+            f"- Operator review sheet: `{(audit_dir / 'actions_operator.csv').name}` — compact triage-first layout derived from the action rows",
+            f"- Actions: `{(audit_dir / 'actions.csv').name}` — prioritized non-keep audit rows and review rows",
+            f"- Write plan: `{(audit_dir / 'write_plan.csv').name}` — full-library apply sheet; review `safe_to_apply_boolean` and `action_type` before apply",
+        ],
+    )
 
-    return {
-        "root": output_dir,
-        "summary": audit_dir / "summary.md",
-        "actions_operator": audit_dir / "actions_operator.csv",
-        "actions": audit_dir / "actions.csv",
-        "write_plan": audit_dir / "write_plan.csv",
-        "readme": output_dir / "README.md",
-    }
+    return AuditOutputPaths(
+        root=output_dir,
+        summary=audit_dir / "summary.md",
+        readme=readme_path,
+        actions_operator=audit_dir / "actions_operator.csv",
+        actions=audit_dir / "actions.csv",
+        write_plan=audit_dir / "write_plan.csv",
+    )
 
 
 def build_discovery_outputs(
@@ -268,7 +302,7 @@ def build_discovery_outputs(
     output_dir: Path,
     *,
     bookshelf_result: BookshelfIntegrationResult | None = None,
-) -> Dict[str, Path]:
+) -> DiscoveryOutputPaths:
     ensure_dir(output_dir)
     discovery_dir = output_dir / "discovery"
     ensure_dir(discovery_dir)
@@ -300,26 +334,28 @@ def build_discovery_outputs(
             "- candidates.csv — unified discovery sheet for missing-series and owned-author candidates",
         ]
     )
-    output_paths: Dict[str, Path] = {
-        "root": output_dir,
-        "summary": discovery_dir / "summary.md",
-        "candidates": discovery_dir / "candidates.csv",
-        "readme": output_dir / "README.md",
-    }
+    bookshelf_queue_path: Path | None = None
+    bookshelf_queue_json_path: Path | None = None
+    bookshelf_push_log_path: Path | None = None
+    bookshelf_summary_path: Path | None = None
 
     if bookshelf_result is not None:
+        bookshelf_queue_path = discovery_dir / "bookshelf_queue.csv"
+        bookshelf_queue_json_path = discovery_dir / "bookshelf_queue.json"
+        bookshelf_push_log_path = discovery_dir / "bookshelf_push_log.csv"
+        bookshelf_summary_path = discovery_dir / "bookshelf_summary.md"
         write_csv(
-            discovery_dir / "bookshelf_queue.csv",
+            bookshelf_queue_path,
             list(bookshelf_result.queue_rows),
             fieldnames=BOOKSHELF_QUEUE_COLUMNS,
         )
-        write_json(discovery_dir / "bookshelf_queue.json", list(bookshelf_result.queue_rows))
+        write_json(bookshelf_queue_json_path, list(bookshelf_result.queue_rows))
         write_csv(
-            discovery_dir / "bookshelf_push_log.csv",
+            bookshelf_push_log_path,
             list(bookshelf_result.push_log_rows),
             fieldnames=BOOKSHELF_PUSH_LOG_COLUMNS,
         )
-        _write_summary(discovery_dir / "bookshelf_summary.md", bookshelf_result.summary_lines)
+        _write_summary(bookshelf_summary_path, bookshelf_result.summary_lines)
         summary_lines.extend(
             [
                 "",
@@ -336,20 +372,9 @@ def build_discovery_outputs(
                 "- bookshelf_summary.md — Bookshelf export/push summary",
             ]
         )
-        output_paths.update(
-            {
-                "bookshelf_queue": discovery_dir / "bookshelf_queue.csv",
-                "bookshelf_queue_json": discovery_dir / "bookshelf_queue.json",
-                "bookshelf_push_log": discovery_dir / "bookshelf_push_log.csv",
-                "bookshelf_summary": discovery_dir / "bookshelf_summary.md",
-            }
-        )
     _write_summary(discovery_dir / "summary.md", summary_lines)
 
     readme_lines = [
-        "# Output overview",
-        "",
-        "## Discovery",
         f"- Summary: `{(discovery_dir / 'summary.md').name}`",
         f"- Candidates: `{(discovery_dir / 'candidates.csv').name}`",
     ]
@@ -362,10 +387,18 @@ def build_discovery_outputs(
                 f"- Bookshelf summary: `{(discovery_dir / 'bookshelf_summary.md').name}`",
             ]
         )
-    readme_lines.extend(["", "`run.log` remains in the root output directory for the full execution trace."])
-    _write_summary(output_dir / "README.md", readme_lines)
+    readme_path = _write_root_readme(output_dir, "Discovery", readme_lines)
 
-    return output_paths
+    return DiscoveryOutputPaths(
+        root=output_dir,
+        summary=discovery_dir / "summary.md",
+        readme=readme_path,
+        candidates=discovery_dir / "candidates.csv",
+        bookshelf_queue=bookshelf_queue_path,
+        bookshelf_queue_json=bookshelf_queue_json_path,
+        bookshelf_push_log=bookshelf_push_log_path,
+        bookshelf_summary=bookshelf_summary_path,
+    )
 
 
 def build_apply_outputs(
@@ -373,7 +406,7 @@ def build_apply_outputs(
     output_dir: Path,
     *,
     summary: Mapping[str, Any],
-) -> Dict[str, Path]:
+) -> ApplyOutputPaths:
     ensure_dir(output_dir)
     apply_dir = output_dir / "apply"
     ensure_dir(apply_dir)
@@ -441,20 +474,18 @@ def build_apply_outputs(
     )
     _write_summary(apply_dir / "summary.md", summary_lines)
 
-    readme_lines = [
-        "# Output overview",
-        "",
-        "## Apply",
-        f"- Summary: `{(apply_dir / 'summary.md').name}`",
-        f"- Apply log: `{(apply_dir / 'apply_log.csv').name}` — includes db_write_status, file_write_target, and file_write_status columns",
-        "",
-        "`run.log` remains in the root output directory for the full execution trace.",
-    ]
-    _write_summary(output_dir / "README.md", readme_lines)
+    readme_path = _write_root_readme(
+        output_dir,
+        "Apply",
+        [
+            f"- Summary: `{(apply_dir / 'summary.md').name}`",
+            f"- Apply log: `{(apply_dir / 'apply_log.csv').name}` — includes db_write_status, file_write_target, and file_write_status columns",
+        ],
+    )
 
-    return {
-        "root": output_dir,
-        "summary": apply_dir / "summary.md",
-        "apply_log": apply_dir / "apply_log.csv",
-        "readme": output_dir / "README.md",
-    }
+    return ApplyOutputPaths(
+        root=output_dir,
+        summary=apply_dir / "summary.md",
+        readme=readme_path,
+        apply_log=apply_dir / "apply_log.csv",
+    )

@@ -663,8 +663,11 @@ class HardcoverClient:
             f"Hardcover transports: {transport_bits}",
         ]
 
+    def stats_summary_lines(self) -> List[str]:
+        return list(self._build_stats_summary_lines())
+
     def print_stats_summary(self) -> None:
-        for line in self._build_stats_summary_lines():
+        for line in self.stats_summary_lines():
             print(line)
 
     def _post_graphql_via_curl(

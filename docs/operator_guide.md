@@ -58,8 +58,28 @@ Optional but useful:
 - `--author-aliases-json` for author alias normalization
 - `--ebook-meta-command` to point at a host `ebook-meta`
 - `--docker-ebook-meta-container` plus `--container-library-root` if `ebook-meta` lives in Docker
+- `--cwa-app-db` and/or `--cwa-dirs-json` to derive runtime paths from a Calibre-Web-Automated deployment
 
 If `ebook-meta` is unavailable, the tools still run, but metadata probing falls back to weaker EPUB/content extraction. That is acceptable for smoke checks, but for a real library you usually want a working `ebook-meta`.
+
+## CWA Compatibility
+
+The runtime layer can optionally derive `--library-root` and `--metadata-db` from Calibre-Web-Automated files:
+
+- `--cwa-app-db /config/app.db`
+- `--cwa-dirs-json /app/calibre-web-automated/dirs.json`
+- the flags are opt-in and leave default path handling unchanged when omitted
+- explicit `--library-root` and `--metadata-db` still override the derived values
+
+Resolution rules:
+
+- with split-library enabled in `app.db`:
+  - library root = `config_calibre_split_dir`
+  - metadata DB = `<config_calibre_dir>/metadata.db`
+- without split-library:
+  - library root = `dirs.json.calibre_library_dir` when `--cwa-dirs-json` is provided
+  - otherwise library root = `app.db.config_calibre_dir`
+  - metadata DB = `<library-root>/metadata.db`
 
 ## Path Defaults
 
@@ -98,6 +118,25 @@ Audit:
 HARDCOVER_TOKEN='your_raw_token_here' \
 hardcover-audit \
   --library-root /path/to/calibre-library
+```
+
+Audit against a standard CWA deployment:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-audit \
+  --cwa-app-db /config/app.db \
+  --cwa-dirs-json /app/calibre-web-automated/dirs.json
+```
+
+Apply dry-run against a CWA split-library deployment:
+
+```bash
+hardcover-apply \
+  --cwa-app-db /config/app.db \
+  --cwa-dirs-json /app/calibre-web-automated/dirs.json \
+  --write-plan /path/to/output/audit/write_plan.csv \
+  --dry-run
 ```
 
 Default audit logging is concise and progress-oriented. Use `--verbose` when you want per-book decision lines, and reserve `--debug-hardcover` for low-level Hardcover/cache troubleshooting.
