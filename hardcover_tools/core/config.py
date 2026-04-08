@@ -113,6 +113,13 @@ class DiscoveryCliConfig(RuntimeCliConfig):
     shelfmark_selection: str = "best"
     shelfmark_format_keywords: Tuple[str, ...] = ()
     shelfmark_min_seeders: int = 0
+    shelfmark_allowed_indexers: Tuple[str, ...] = ()
+    shelfmark_blocked_indexers: Tuple[str, ...] = ()
+    shelfmark_require_protocol: str = ""
+    shelfmark_timeout_seconds: int = 30
+    shelfmark_min_interval_ms: int = 1000
+    shelfmark_max_retries: int = 1
+    shelfmark_retry_backoff_seconds: float = 2.0
 
     @classmethod
     def from_namespace(cls, namespace: argparse.Namespace) -> "DiscoveryCliConfig":
@@ -160,6 +167,24 @@ class DiscoveryCliConfig(RuntimeCliConfig):
                 if keyword.strip()
             ),
             shelfmark_min_seeders=max(0, int(namespace.shelfmark_min_seeders or 0)),
+            shelfmark_allowed_indexers=tuple(
+                indexer.strip()
+                for indexer in str(namespace.shelfmark_allowed_indexers or "").split(",")
+                if indexer.strip()
+            ),
+            shelfmark_blocked_indexers=tuple(
+                indexer.strip()
+                for indexer in str(namespace.shelfmark_blocked_indexers or "").split(",")
+                if indexer.strip()
+            ),
+            shelfmark_require_protocol=str(namespace.shelfmark_require_protocol or "").strip().lower(),
+            shelfmark_timeout_seconds=max(1, int(namespace.shelfmark_timeout_seconds or 30)),
+            shelfmark_min_interval_ms=max(0, int(namespace.shelfmark_min_interval_ms or 0)),
+            shelfmark_max_retries=max(0, int(namespace.shelfmark_max_retries or 0)),
+            shelfmark_retry_backoff_seconds=max(
+                0.0,
+                float(namespace.shelfmark_retry_backoff_seconds or 0.0),
+            ),
         )
 
 
@@ -430,6 +455,48 @@ def build_discovery_parser() -> argparse.ArgumentParser:
         help="Minimum seeders required for a Shelfmark release candidate. Default: 0.",
     )
     parser.add_argument(
+        "--shelfmark-allowed-indexers",
+        type=str,
+        default="",
+        help="Comma-separated case-insensitive allowlist of underlying Shelfmark indexer names. Applied before release selection. For `prowlarr`, allowed indexers are also passed to Shelfmark search when possible.",
+    )
+    parser.add_argument(
+        "--shelfmark-blocked-indexers",
+        type=str,
+        default="",
+        help="Comma-separated case-insensitive blocklist of underlying Shelfmark indexer names. Applied before release selection.",
+    )
+    parser.add_argument(
+        "--shelfmark-require-protocol",
+        choices=("http", "torrent", "nzb", "dcc"),
+        default="",
+        help="Require a specific Shelfmark release protocol before selection, for example `torrent` or `http`.",
+    )
+    parser.add_argument(
+        "--shelfmark-timeout-seconds",
+        type=int,
+        default=30,
+        help="Per-request timeout for Shelfmark release searches. Default: 30 seconds.",
+    )
+    parser.add_argument(
+        "--shelfmark-min-interval-ms",
+        type=int,
+        default=1000,
+        help="Minimum interval between Shelfmark release-search HTTP requests. Default: 1000 ms.",
+    )
+    parser.add_argument(
+        "--shelfmark-max-retries",
+        type=int,
+        default=1,
+        help="Maximum retries for retryable Shelfmark release-search failures such as timeout, 429, or 503. Default: 1.",
+    )
+    parser.add_argument(
+        "--shelfmark-retry-backoff-seconds",
+        type=float,
+        default=2.0,
+        help="Base backoff in seconds between retryable Shelfmark release-search attempts. Default: 2.0.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="For opt-in downstream discovery integrations, write queue/log artifacts and validate setup without sending live add/request mutations.",
@@ -587,6 +654,30 @@ def parse_discovery_args(argv: Optional[Sequence[str]] = None) -> DiscoveryCliCo
             parser.error("--export-shelfmark-releases/--push-shelfmark-download require " + ", ".join(missing))
     if namespace.shelfmark_selection == "preferred-format" and not str(namespace.shelfmark_format_keywords or "").strip():
         parser.error("--shelfmark-selection preferred-format requires --shelfmark-format-keywords")
+    if int(namespace.shelfmark_timeout_seconds or 0) <= 0:
+        parser.error("--shelfmark-timeout-seconds must be >= 1")
+    if int(namespace.shelfmark_min_interval_ms or 0) < 0:
+        parser.error("--shelfmark-min-interval-ms must be >= 0")
+    if int(namespace.shelfmark_max_retries or 0) < 0:
+        parser.error("--shelfmark-max-retries must be >= 0")
+    if float(namespace.shelfmark_retry_backoff_seconds or 0.0) < 0:
+        parser.error("--shelfmark-retry-backoff-seconds must be >= 0")
+    allowed_indexers = {
+        str(indexer).strip().casefold()
+        for indexer in str(namespace.shelfmark_allowed_indexers or "").split(",")
+        if str(indexer).strip()
+    }
+    blocked_indexers = {
+        str(indexer).strip().casefold()
+        for indexer in str(namespace.shelfmark_blocked_indexers or "").split(",")
+        if str(indexer).strip()
+    }
+    overlap = sorted(allowed_indexers.intersection(blocked_indexers))
+    if overlap:
+        parser.error(
+            "--shelfmark-allowed-indexers and --shelfmark-blocked-indexers overlap: "
+            + ", ".join(overlap)
+        )
     return DiscoveryCliConfig.from_namespace(namespace)
 
 

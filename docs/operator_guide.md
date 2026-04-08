@@ -279,6 +279,43 @@ hardcover-discovery \
   --dry-run
 ```
 
+Discovery with Shelfmark dry-run release search via `prowlarr`:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --export-shelfmark-releases \
+  --shelfmark-url http://shelfmark.local:8084 \
+  --shelfmark-source prowlarr \
+  --shelfmark-content-type ebook \
+  --dry-run
+```
+
+Discovery with Shelfmark allowlisted indexers only:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --export-shelfmark-releases \
+  --shelfmark-url http://shelfmark.local:8084 \
+  --shelfmark-source prowlarr \
+  --shelfmark-allowed-indexers "MyAnonamouse,Anna's Archive"
+```
+
+Discovery with Shelfmark blocked indexers:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --export-shelfmark-releases \
+  --shelfmark-url http://shelfmark.local:8084 \
+  --shelfmark-source prowlarr \
+  --shelfmark-blocked-indexers "Indexer To Skip,Other Indexer"
+```
+
 Discovery with Shelfmark dry-run queue/download:
 
 ```bash
@@ -292,6 +329,18 @@ hardcover-discovery \
   --dry-run
 ```
 
+Discovery with Shelfmark timeout override:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --export-shelfmark-releases \
+  --shelfmark-url http://shelfmark.local:8084 \
+  --shelfmark-source prowlarr \
+  --shelfmark-timeout-seconds 60
+```
+
 Discovery with live Shelfmark queue/download:
 
 ```bash
@@ -303,6 +352,20 @@ hardcover-discovery \
   --shelfmark-source libgen \
   --shelfmark-content-type ebook \
   --shelfmark-selection best
+```
+
+Discovery with slower pacing and retries for rate-limited providers:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --export-shelfmark-releases \
+  --shelfmark-url http://shelfmark.local:8084 \
+  --shelfmark-source prowlarr \
+  --shelfmark-min-interval-ms 3000 \
+  --shelfmark-max-retries 2 \
+  --shelfmark-retry-backoff-seconds 4
 ```
 
 Apply dry-run:
@@ -513,6 +576,7 @@ Shared safety model:
 - suppressed rows are never exported or pushed
 - queue/download is never attempted unless `--push-shelfmark-download` is explicitly set
 - the concrete release source is always operator-selected via `--shelfmark-source`
+- `--dry-run` keeps the same release-search and logging path but skips live request submission and live queue/download
 
 Request workflow flags:
 
@@ -549,6 +613,13 @@ Release workflow flags:
 - optional `--shelfmark-selection best|most_seeders|first|largest|preferred-format`
 - optional `--shelfmark-format-keywords epub,kepub,pdf,...`
 - optional `--shelfmark-min-seeders N`
+- optional `--shelfmark-allowed-indexers idx1,idx2,...`
+- optional `--shelfmark-blocked-indexers idx1,idx2,...`
+- optional `--shelfmark-require-protocol http|torrent|nzb|dcc`
+- optional `--shelfmark-timeout-seconds N`
+- optional `--shelfmark-min-interval-ms N`
+- optional `--shelfmark-max-retries N`
+- optional `--shelfmark-retry-backoff-seconds N`
 - optional `--shelfmark-username`
 - optional `--shelfmark-password`
 - optional `--dry-run`
@@ -560,10 +631,13 @@ Release workflow:
    - `provider=hardcover`
    - `book_id=<hardcover-id>`
 3. If that finds no releases, it falls back to a title+author search against the same source.
-4. Returned releases are filtered for explicit source match, content type, format keywords, minimum seeders, and concrete `source` + `source_id`.
+4. Returned releases are filtered for explicit source match, content type, format keywords, minimum seeders, allowlisted/blocklisted indexers, required protocol, and concrete `source` + `source_id`.
 5. One accepted release is selected with the explicit rule from `--shelfmark-selection`.
 6. Only `--push-shelfmark-download` calls `POST /api/releases/download`.
    Otherwise the selected release is exported and logged without queueing anything.
+7. Release searches are serial and paced with `--shelfmark-min-interval-ms`.
+8. Retryable failures such as timeouts, `429`, and `503` may be retried with `--shelfmark-max-retries` and `--shelfmark-retry-backoff-seconds`.
+9. Per-row release-search failures are logged and skipped; the rest of the discovery run continues.
 
 Selection rules:
 
@@ -572,6 +646,15 @@ Selection rules:
 - `largest`: largest `size_bytes`, then higher seeders, then stable response order
 - `preferred-format`: earliest matching keyword from `--shelfmark-format-keywords`, then higher seeders, then larger size
 - `best`: format-keyword priority when keywords are provided, otherwise a conservative built-in format priority, then higher seeders, then larger size
+
+Hardening details:
+
+- `--shelfmark-source` always targets the top-level Shelfmark source, not the underlying indexer
+- when `--shelfmark-source prowlarr` is used, `--shelfmark-allowed-indexers` and `--shelfmark-blocked-indexers` apply to the returned `release.indexer` values
+- allow/block indexer matching is exact after case-folding and whitespace normalization
+- `--shelfmark-require-protocol` applies before selection, so only matching candidates reach the selector
+- transient failures are logged with timeout / HTTP status / error body details and do not abort the full run
+- `shelfmark_release_candidates.csv`, `shelfmark_selected_releases.csv`, and `shelfmark_download_log.csv` include retry counts, filter decisions, candidate counts before/after filtering, and final row actions
 
 Artifacts:
 
@@ -589,4 +672,4 @@ Limitations:
 - the request workflow still depends on Shelfmark’s authenticated request API
 - the release workflow may run without credentials on a no-auth Shelfmark instance, or with username/password when the instance requires auth
 - the release workflow only queues downloads when Shelfmark returns a concrete release with `source` and `source_id`
-- if all returned releases fail source/content-type/format/min-seeder checks, the row is exported and logged as skipped rather than queued
+- if all returned releases fail source/content-type/format/indexer/protocol/min-seeder checks, the row is exported and logged as filtered out rather than queued

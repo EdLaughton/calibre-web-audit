@@ -359,6 +359,13 @@ Shelfmark connection and control flags:
 - optional for release workflows: `--shelfmark-selection best|most_seeders|first|largest|preferred-format`
 - optional for release workflows: `--shelfmark-format-keywords epub,kepub,pdf,...`
 - optional for release workflows: `--shelfmark-min-seeders N`
+- optional for release workflows: `--shelfmark-allowed-indexers idx1,idx2,...`
+- optional for release workflows: `--shelfmark-blocked-indexers idx1,idx2,...`
+- optional for release workflows: `--shelfmark-require-protocol http|torrent|nzb|dcc`
+- optional for release workflows: `--shelfmark-timeout-seconds N`
+- optional for release workflows: `--shelfmark-min-interval-ms N`
+- optional for release workflows: `--shelfmark-max-retries N`
+- optional for release workflows: `--shelfmark-retry-backoff-seconds N`
 
 Shelfmark request workflow:
 
@@ -387,6 +394,8 @@ Shelfmark release workflow:
    - requested content type when the release advertises one
    - requested format keywords when provided
    - minimum seeders when provided
+   - allowed / blocked underlying indexers when configured
+   - required protocol when configured
    - presence of concrete `source` and `source_id`
 5. One accepted release is selected with an explicit deterministic rule:
    - `first`
@@ -396,6 +405,9 @@ Shelfmark release workflow:
    - `best`
 6. Only `--push-shelfmark-download` queues the selected release to `POST /api/releases/download`.
    Without that flag, `discovery` exports the chosen release and logs what would have been queued.
+7. Release searches are paced serially with a conservative default request interval.
+8. Transient failures such as timeouts, `429`, and `503` can be retried with explicit backoff controls.
+9. Per-row search failures are logged and skipped without aborting the whole discovery run unless the setup itself is invalid.
 
 Selection rules:
 
@@ -404,6 +416,17 @@ Selection rules:
 - `largest`: largest `size_bytes`, then higher seeders, then stable response order
 - `preferred-format`: earliest matching keyword in `--shelfmark-format-keywords`, then higher seeders, then larger size
 - `best`: if format keywords are provided, earliest matching keyword wins; otherwise a conservative built-in format priority is used, then higher seeders, then larger size
+
+Release hardening behavior:
+
+- `--shelfmark-source` must always name the top-level Shelfmark source, such as `direct_download` or `prowlarr`
+- when `--shelfmark-source prowlarr` is used, allow/block filtering applies to the underlying `release.indexer` values returned by Shelfmark
+- allow/block indexer matching is exact after case-folding and whitespace normalization
+- `--shelfmark-allowed-indexers` is applied before selection and may also be passed through to Shelfmark’s `indexers=` search parameter for `prowlarr`
+- `--shelfmark-blocked-indexers` is applied locally before selection
+- `--shelfmark-require-protocol` filters releases by the returned `protocol` field before selection
+- bad sources, timeouts, and upstream/provider errors are logged per row and do not stall the rest of the run
+- `shelfmark_release_candidates.csv`, `shelfmark_selected_releases.csv`, and `shelfmark_download_log.csv` record candidate counts before and after filtering, retry counts, HTTP status, error kind, error message/body, and the final row action
 
 Auth model:
 
@@ -468,6 +491,43 @@ hardcover-discovery \
   --dry-run
 ```
 
+Example dry-run with `prowlarr` and ebook-only filtering:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --export-shelfmark-releases \
+  --shelfmark-url http://shelfmark.local:8084 \
+  --shelfmark-source prowlarr \
+  --shelfmark-content-type ebook \
+  --dry-run
+```
+
+Example allowlisted indexers only:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --export-shelfmark-releases \
+  --shelfmark-url http://shelfmark.local:8084 \
+  --shelfmark-source prowlarr \
+  --shelfmark-allowed-indexers "MyAnonamouse,Anna's Archive"
+```
+
+Example blocked indexers:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --export-shelfmark-releases \
+  --shelfmark-url http://shelfmark.local:8084 \
+  --shelfmark-source prowlarr \
+  --shelfmark-blocked-indexers "Indexer To Skip,Other Indexer"
+```
+
 Example dry-run queue/download:
 
 ```bash
@@ -479,6 +539,18 @@ hardcover-discovery \
   --shelfmark-source libgen \
   --shelfmark-content-type ebook \
   --dry-run
+```
+
+Example timeout override:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --export-shelfmark-releases \
+  --shelfmark-url http://shelfmark.local:8084 \
+  --shelfmark-source prowlarr \
+  --shelfmark-timeout-seconds 60
 ```
 
 Example live queue/download with explicit source selection:
@@ -520,12 +592,27 @@ hardcover-discovery \
   --shelfmark-min-seeders 10
 ```
 
+Example slower pacing with retries for rate-limited providers:
+
+```bash
+HARDCOVER_TOKEN='your_raw_token_here' \
+hardcover-discovery \
+  --library-root /path/to/calibre-library \
+  --export-shelfmark-releases \
+  --shelfmark-url http://shelfmark.local:8084 \
+  --shelfmark-source prowlarr \
+  --shelfmark-min-interval-ms 3000 \
+  --shelfmark-max-retries 2 \
+  --shelfmark-retry-backoff-seconds 4
+```
+
 Limitations:
 
 - direct queue/download still depends on Shelfmark returning at least one concrete release with `source` and `source_id`
-- if all returned releases fail source/content-type/format/min-seeder checks, the row is exported and logged as skipped
+- if all returned releases fail source/content-type/format/indexer/protocol/min-seeder checks, the row is exported and logged as filtered out
 - the request workflow and the release workflow are separate by design; request policy does not control direct release downloads
 - the release workflow does not invent or guess a release when multiple results exist; it only applies the explicit operator-selected rule and logs why that rule chose the winner
+- retries stay serial and conservative in this pass; there is no concurrent release search fan-out
 
 ## Safe Apply Workflow
 

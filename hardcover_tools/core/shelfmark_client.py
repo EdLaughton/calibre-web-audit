@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.cookiejar
 import json
+import socket
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 from urllib import error as urllib_error
@@ -18,10 +19,12 @@ class ShelfmarkApiError(RuntimeError):
     status_code: int = 0
     response_body: str = ""
     payload: Optional[Mapping[str, Any]] = None
+    kind: str = "http_error"
+    retryable: bool = False
 
     def __str__(self) -> str:
         if self.status_code:
-            return f"{self.message} (status={self.status_code})"
+            return f"{self.message} (status={self.status_code}, kind={self.kind})"
         return self.message
 
 
@@ -73,6 +76,8 @@ class ShelfmarkClient:
         title: Optional[str] = None,
         author: Optional[str] = None,
         format_keywords: Optional[list[str]] = None,
+        indexers: Optional[list[str]] = None,
+        timeout_seconds: Optional[int] = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {}
         if provider:
@@ -91,7 +96,9 @@ class ShelfmarkClient:
             params["author"] = str(author).strip()
         if format_keywords:
             params["format"] = [str(keyword).strip() for keyword in format_keywords if str(keyword).strip()]
-        payload = self._request("GET", "/api/releases", params=params)
+        if indexers:
+            params["indexers"] = [str(indexer).strip() for indexer in indexers if str(indexer).strip()]
+        payload = self._request("GET", "/api/releases", params=params, timeout_seconds=timeout_seconds)
         return dict(payload) if isinstance(payload, Mapping) else {}
 
     def queue_release(self, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -105,6 +112,7 @@ class ShelfmarkClient:
         *,
         params: Optional[Mapping[str, Any]] = None,
         payload: Optional[Mapping[str, Any]] = None,
+        timeout_seconds: Optional[int] = None,
     ) -> Any:
         url = self._build_url(path, params=params)
         headers = {
@@ -116,8 +124,9 @@ class ShelfmarkClient:
             headers["Content-Type"] = "application/json"
             data = json.dumps(payload).encode("utf-8")
         request = urllib_request.Request(url, data=data, headers=headers, method=method.upper())
+        timeout = max(1, int(timeout_seconds or self.timeout))
         try:
-            with self.opener.open(request, timeout=self.timeout) as response:
+            with self.opener.open(request, timeout=timeout) as response:
                 raw_body = response.read().decode("utf-8")
                 if not raw_body.strip():
                     return {}
@@ -130,11 +139,35 @@ class ShelfmarkClient:
                 status_code=int(getattr(exc, "code", 0) or 0),
                 response_body=raw_body,
                 payload=parsed,
+                kind="http_error",
+                retryable=_http_status_retryable(int(getattr(exc, "code", 0) or 0)),
             ) from exc
         except urllib_error.URLError as exc:
-            raise ShelfmarkApiError(message=f"Shelfmark request failed for {method.upper()} {path}: {exc.reason}") from exc
+            reason = getattr(exc, "reason", exc)
+            is_timeout = _looks_like_timeout(reason)
+            raise ShelfmarkApiError(
+                message=f"Shelfmark request failed for {method.upper()} {path}: {reason}",
+                kind="timeout" if is_timeout else "transport_error",
+                retryable=is_timeout,
+            ) from exc
+        except TimeoutError as exc:
+            raise ShelfmarkApiError(
+                message=f"Shelfmark request timed out for {method.upper()} {path}",
+                kind="timeout",
+                retryable=True,
+            ) from exc
+        except socket.timeout as exc:
+            raise ShelfmarkApiError(
+                message=f"Shelfmark request timed out for {method.upper()} {path}",
+                kind="timeout",
+                retryable=True,
+            ) from exc
         except json.JSONDecodeError as exc:
-            raise ShelfmarkApiError(message=f"Shelfmark returned non-JSON response for {method.upper()} {path}") from exc
+            raise ShelfmarkApiError(
+                message=f"Shelfmark returned non-JSON response for {method.upper()} {path}",
+                kind="decode_error",
+                retryable=False,
+            ) from exc
 
     def _build_url(self, path: str, *, params: Optional[Mapping[str, Any]] = None) -> str:
         normalized_path = str(path or "").strip()
@@ -160,6 +193,17 @@ def _parse_error_payload(raw_body: str) -> Optional[Mapping[str, Any]]:
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, Mapping) else None
+
+
+def _looks_like_timeout(reason: Any) -> bool:
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return True
+    lowered = str(reason or "").strip().lower()
+    return "timed out" in lowered or lowered == "timeout"
+
+
+def _http_status_retryable(status_code: int) -> bool:
+    return int(status_code or 0) in {408, 429, 500, 502, 503, 504}
 
 
 __all__ = [

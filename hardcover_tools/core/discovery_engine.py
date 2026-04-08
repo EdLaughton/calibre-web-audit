@@ -559,6 +559,13 @@ def _execute_discovery(context: CommandRuntimeContext, config: DiscoveryCliConfi
             shelfmark_selection=config.shelfmark_selection,
             shelfmark_format_keywords=config.shelfmark_format_keywords,
             shelfmark_min_seeders=config.shelfmark_min_seeders,
+            shelfmark_allowed_indexers=config.shelfmark_allowed_indexers,
+            shelfmark_blocked_indexers=config.shelfmark_blocked_indexers,
+            shelfmark_require_protocol=config.shelfmark_require_protocol,
+            shelfmark_timeout_seconds=config.shelfmark_timeout_seconds,
+            shelfmark_min_interval_ms=config.shelfmark_min_interval_ms,
+            shelfmark_max_retries=config.shelfmark_max_retries,
+            shelfmark_retry_backoff_seconds=config.shelfmark_retry_backoff_seconds,
             verbose=config.verbose,
         )
 
