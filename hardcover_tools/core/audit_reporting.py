@@ -362,7 +362,7 @@ def build_hardcover_edition_write_candidates(rows: List[AuditRow]) -> List[Dict[
                 "current_hardcover_title": row.current_hardcover_title,
                 "current_hardcover_author": row.current_hardcover_authors,
                 "suggested_hardcover_title": row.suggested_hardcover_title or row.hardcover_title,
-                "suggested_hardcover_author": row.suggested_hardcover_authors or row.hardcover_authors,
+                "suggested_hardcover_author": _preferred_row_author_target(row) or row.hardcover_authors,
                 "relink_confidence": row.confidence_tier,
                 "relink_reason": row.reason,
             }
@@ -463,13 +463,13 @@ def build_write_plan(rows: List[AuditRow]) -> List[Dict[str, Any]]:
                 "current_calibre_title": row.calibre_title,
                 "new_calibre_title": row.suggested_calibre_title or row.calibre_title,
                 "current_calibre_author": row.calibre_authors,
-                "new_calibre_author": row.suggested_calibre_authors or row.calibre_authors,
+                "new_calibre_author": _preferred_row_author_target(row) or row.calibre_authors,
                 "current_hardcover_id": row.calibre_hardcover_id,
                 "new_hardcover_id": row.suggested_hardcover_id or row.calibre_hardcover_id,
                 "current_hardcover_title": row.current_hardcover_title,
                 "current_hardcover_author": row.current_hardcover_authors,
                 "suggested_hardcover_title": row.suggested_hardcover_title or row.hardcover_title,
-                "suggested_hardcover_author": row.suggested_hardcover_authors or row.hardcover_authors,
+                "suggested_hardcover_author": _preferred_row_author_target(row) or row.hardcover_authors,
                 "relink_confidence": row.confidence_tier,
                 "relink_reason": row.reason,
                 "current_hardcover_edition_id": row.current_hardcover_edition_id,
@@ -523,6 +523,18 @@ def choose_preferred_display(counter: Counter[str]) -> str:
     return sorted(counter.items(), key=lambda item: (-item[1], len(item[0]), norm(item[0]), item[0]))[0][0]
 
 
+def _preferred_row_author_target(row: AuditRow) -> str:
+    return (
+        row.suggested_hardcover_authors
+        or row.current_hardcover_authors
+        or row.hardcover_authors
+        or row.suggested_calibre_authors
+        or row.file_work_authors
+        or row.calibre_authors
+        or ""
+    )
+
+
 def build_author_normalisation_review(rows: List[AuditRow]) -> List[Dict[str, Any]]:
     name_clusters: Dict[str, Dict[str, Any]] = {}
     string_clusters: Dict[Tuple[str, ...], Dict[str, Any]] = {}
@@ -551,13 +563,7 @@ def build_author_normalisation_review(rows: List[AuditRow]) -> List[Dict[str, An
     for row in rows:
         title = smart_title(row.suggested_calibre_title or row.calibre_title or "")
         calibre_full = normalize_author_string(row.calibre_authors)
-        reference_full = normalize_author_string(
-            row.suggested_calibre_authors
-            or row.suggested_hardcover_authors
-            or row.current_hardcover_authors
-            or row.hardcover_authors
-            or ""
-        )
+        reference_full = normalize_author_string(_preferred_row_author_target(row))
 
         if calibre_full:
             full_key = canonical_author_set(calibre_full)
@@ -703,11 +709,9 @@ def _duplicate_title_author_key(row: AuditRow) -> Tuple[str, Tuple[str, ...]]:
         or row.current_hardcover_title
     )
     authors = (
-        row.suggested_calibre_authors
+        _preferred_row_author_target(row)
         or row.file_work_authors
         or row.calibre_authors
-        or row.suggested_hardcover_authors
-        or row.current_hardcover_authors
     )
     return norm(strip_series_suffix(title or "")), canonical_author_set(authors or "")
 

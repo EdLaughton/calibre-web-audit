@@ -339,18 +339,40 @@ def _upsert_identifier(
 
 
 def _ensure_author(connection: sqlite3.Connection, author_name: str) -> tuple[int, str]:
+    normalized_name = " ".join(str(author_name or "").strip().split())
+    normalized_sort = _author_sort_fallback(normalized_name)
+
     row = connection.execute(
         "SELECT id, sort FROM authors WHERE name = ? COLLATE NOCASE",
-        (author_name,),
+        (normalized_name,),
     ).fetchone()
     if row is not None:
-        return int(row["id"]), str(row["sort"] or "").strip() or _author_sort_fallback(author_name)
-    author_sort = _author_sort_fallback(author_name)
+        author_id = int(row["id"])
+        current_sort = str(row["sort"] or "").strip()
+        if normalized_sort and current_sort != normalized_sort:
+            connection.execute(
+                "UPDATE authors SET sort = ? WHERE id = ?",
+                (normalized_sort, author_id),
+            )
+        return author_id, (normalized_sort or current_sort)
+
     cursor = connection.execute(
         "INSERT INTO authors (name, sort, link) VALUES (?, ?, '')",
-        (author_name, author_sort),
+        (normalized_name, normalized_sort),
     )
-    return int(cursor.lastrowid), author_sort
+    return int(cursor.lastrowid), normalized_sort
+
+def _compute_book_author_sort(
+    connection: sqlite3.Connection,
+    author_names: Sequence[str],
+) -> str:
+    author_sort_values: list[str] = []
+    for author_name in author_names:
+        _, author_sort = _ensure_author(connection, author_name)
+        if author_sort:
+            author_sort_values.append(author_sort)
+    return " & ".join(author_sort_values)
+
 
 
 def _update_authors_for_book(
@@ -379,7 +401,14 @@ def _update_authors_for_book(
         ).fetchone()
         if still_referenced is None:
             connection.execute("DELETE FROM authors WHERE id = ?", (author_id,))
-    return " & ".join(value for value in author_sort_values if value)
+
+    joined_author_sort = " & ".join(value for value in author_sort_values if value)
+    if joined_author_sort:
+        connection.execute(
+            "UPDATE books SET author_sort = ? WHERE id = ?",
+            (joined_author_sort, calibre_book_id),
+        )
+    return joined_author_sort
 
 
 def _book_last_modified(connection: sqlite3.Connection, calibre_book_id: int, timestamp: str) -> None:
@@ -447,7 +476,14 @@ def _resolve_desired_metadata(
 
     requested_title = (plan_row.requested_title.strip() or state.title) if include_calibre_title_author else state.title
     requested_author_names = (
-        tuple(split_author_like_string(plan_row.requested_authors)) or tuple(state.authors)
+        tuple(
+            dict.fromkeys(
+                author
+                for author in split_author_like_string(plan_row.requested_authors)
+                if str(author or "").strip()
+            )
+        )
+        or tuple(state.authors)
     ) if include_calibre_title_author else tuple(state.authors)
     return DesiredMetadata(
         title=requested_title,
@@ -498,18 +534,33 @@ def _apply_database_changes(
                 (desired.title, plan_row.calibre_book_id),
             )
             changed_fields.append("calibre_title")
+
         requested_author_names = list(desired.authors)
+        desired_book_author_sort = (
+            _compute_book_author_sort(connection, requested_author_names)
+            if requested_author_names
+            else state.author_sort
+        )
+
         if requested_author_names and requested_author_names != state.authors:
             book_author_sort = _update_authors_for_book(
                 connection,
                 plan_row.calibre_book_id,
                 requested_author_names,
             )
+            if book_author_sort != state.author_sort:
+                connection.execute(
+                    "UPDATE books SET author_sort = ? WHERE id = ?",
+                    (book_author_sort, plan_row.calibre_book_id),
+                )
+                changed_fields.append("author_sort")
+            changed_fields.append("calibre_authors")
+        elif requested_author_names and desired_book_author_sort != state.author_sort:
             connection.execute(
                 "UPDATE books SET author_sort = ? WHERE id = ?",
-                (book_author_sort, plan_row.calibre_book_id),
+                (desired_book_author_sort, plan_row.calibre_book_id),
             )
-            changed_fields.append("calibre_authors")
+            changed_fields.append("author_sort")
 
     if changed_fields:
         _book_last_modified(connection, plan_row.calibre_book_id, timestamp)

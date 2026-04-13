@@ -501,12 +501,14 @@ def choose_preferred_edition(
 
 
 def effective_candidate_authors(
-    book: HardcoverBook,
+    book: Optional[HardcoverBook],
     preferred_edition: Optional[HardcoverEdition],
 ) -> str:
-    if preferred_edition and preferred_edition.authors and not is_audio_edition(preferred_edition):
+    if preferred_edition and getattr(preferred_edition, "authors", "") and not is_audio_edition(preferred_edition):
         return preferred_edition.authors
-    return book.authors
+    if book and getattr(book, "authors", ""):
+        return book.authors
+    return ""
 
 
 def book_selection_adjusted_score(

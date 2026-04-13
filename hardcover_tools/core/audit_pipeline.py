@@ -283,6 +283,35 @@ def build_search_queries(
     return output
 
 
+def _hardcover_candidate_authors(
+    book: Optional[HardcoverBook],
+    edition: Optional[HardcoverEdition],
+) -> str:
+    if edition and getattr(edition, "authors", None) and not is_audio_edition(edition):
+        return edition.authors
+    if book and getattr(book, "authors", None):
+        return book.authors
+    return ""
+
+
+def _preferred_metadata_authors(
+    primary_book: Optional[HardcoverBook],
+    primary_edition: Optional[HardcoverEdition],
+    *,
+    secondary_book: Optional[HardcoverBook] = None,
+    secondary_edition: Optional[HardcoverEdition] = None,
+    file_authors: str = "",
+    fallback_authors: str = "",
+) -> str:
+    return (
+        _hardcover_candidate_authors(primary_book, primary_edition)
+        or _hardcover_candidate_authors(secondary_book, secondary_edition)
+        or file_authors
+        or fallback_authors
+        or ""
+    )
+
+
 def score_candidate_against_file(
     file_work: FileWork,
     record: BookRecord,
@@ -556,7 +585,8 @@ def decide_action(
     file_vs_calibre_title = bare_title_similarity(file_work.title, record.calibre_title) if file_work.title else 0.0
     file_vs_calibre_auth = author_similarity(file_work.authors, record.calibre_authors) if file_work.authors else 0.0
     file_vs_current_title = bare_title_similarity(file_work.title, current_book.title) if (file_work.title and current_book) else 0.0
-    file_vs_current_auth = author_coverage(file_work.authors, current_book.authors) if (file_work.authors and current_book) else 0.0
+    current_candidate_authors = _hardcover_candidate_authors(current_book, current_edition)
+    file_vs_current_auth = author_coverage(file_work.authors, current_candidate_authors) if (file_work.authors and current_candidate_authors) else 0.0
 
     current_match = current_book is not None and current_score >= 75
     best_match = best_book is not None and best_score >= 80
@@ -569,7 +599,7 @@ def decide_action(
         or (file_work.authors and file_vs_calibre_auth < 0.40)
     )
     file_conflicts_with_current = current_book is not None and current_score < 55
-    best_candidate_authors = effective_candidate_authors(best_book, best_edition) if best_book else ""
+    best_candidate_authors = _hardcover_candidate_authors(best_book, best_edition)
     best_file_title_score = bare_title_similarity(file_work.title, best_book.title) if (file_work.title and best_book) else 0.0
     best_file_author_score = author_coverage(file_work.authors, best_candidate_authors) if (
         file_work.authors and best_candidate_authors
@@ -600,7 +630,14 @@ def decide_action(
                 reason="Current Hardcover work is already correct; normalize the calibre title only",
                 issue_category="formatting_cleanup",
                 suggested_calibre_title=clean_title_for_matching(best_book.title),
-                suggested_calibre_authors=file_work.authors or record.calibre_authors,
+                suggested_calibre_authors=_preferred_metadata_authors(
+                    current_book,
+                    current_edition,
+                    secondary_book=best_book,
+                    secondary_edition=best_edition,
+                    file_authors=file_work.authors,
+                    fallback_authors=record.calibre_authors,
+                ),
                 suggested_hardcover_id=record.calibre_hardcover_id,
                 suggested_hardcover_slug=best_book.slug,
                 **edition_decision_payload(same_id_edition),
@@ -614,7 +651,14 @@ def decide_action(
                 reason="Current Hardcover work is already correct; the calibre title needs updating",
                 issue_category="real_mismatch",
                 suggested_calibre_title=clean_title_for_matching(best_book.title),
-                suggested_calibre_authors=file_work.authors or record.calibre_authors,
+                suggested_calibre_authors=_preferred_metadata_authors(
+                    current_book,
+                    current_edition,
+                    secondary_book=best_book,
+                    secondary_edition=best_edition,
+                    file_authors=file_work.authors,
+                    fallback_authors=record.calibre_authors,
+                ),
                 suggested_hardcover_id=record.calibre_hardcover_id,
                 suggested_hardcover_slug=best_book.slug,
                 **edition_decision_payload(same_id_edition),
@@ -628,7 +672,14 @@ def decide_action(
                 reason="Current Hardcover work is already correct; the calibre author needs updating",
                 issue_category="real_mismatch",
                 suggested_calibre_title=record.calibre_title,
-                suggested_calibre_authors=file_work.authors,
+                suggested_calibre_authors=_preferred_metadata_authors(
+                    current_book,
+                    current_edition,
+                    secondary_book=best_book,
+                    secondary_edition=best_edition,
+                    file_authors=file_work.authors,
+                    fallback_authors=record.calibre_authors,
+                ),
                 suggested_hardcover_id=record.calibre_hardcover_id,
                 suggested_hardcover_slug=best_book.slug,
                 **edition_decision_payload(same_id_edition),
@@ -667,7 +718,12 @@ def decide_action(
                 reason=relink_block_reason,
                 issue_category="manual_review",
                 suggested_calibre_title=clean_title_for_matching(best_book.title),
-                suggested_calibre_authors=file_work.authors or best_book.authors,
+                suggested_calibre_authors=_preferred_metadata_authors(
+                    best_book,
+                    best_edition,
+                    file_authors=file_work.authors,
+                    fallback_authors=record.calibre_authors,
+                ),
                 suggested_hardcover_id=str(best_book.id),
                 suggested_hardcover_slug=best_book.slug,
                 **edition_decision_payload(best_edition),
@@ -696,7 +752,14 @@ def decide_action(
                 reason="Calibre title contains removable series/marketing suffix; normalize to bare work title",
                 issue_category="formatting_cleanup",
                 suggested_calibre_title=clean_title_for_matching(current_book.title),
-                suggested_calibre_authors=file_work.authors or record.calibre_authors,
+                suggested_calibre_authors=_preferred_metadata_authors(
+                    current_book,
+                    current_edition,
+                    secondary_book=best_book,
+                    secondary_edition=best_edition,
+                    file_authors=file_work.authors,
+                    fallback_authors=record.calibre_authors,
+                ),
                 suggested_hardcover_id=record.calibre_hardcover_id,
                 suggested_hardcover_slug=current_book.slug,
                 **edition_decision_payload(current_edition),
@@ -710,7 +773,14 @@ def decide_action(
                 reason="Actual ebook file title differs materially from the calibre title",
                 issue_category="real_mismatch",
                 suggested_calibre_title=clean_title_for_matching(current_book.title),
-                suggested_calibre_authors=file_work.authors or record.calibre_authors,
+                suggested_calibre_authors=_preferred_metadata_authors(
+                    current_book,
+                    current_edition,
+                    secondary_book=best_book,
+                    secondary_edition=best_edition,
+                    file_authors=file_work.authors,
+                    fallback_authors=record.calibre_authors,
+                ),
                 suggested_hardcover_id=record.calibre_hardcover_id,
                 suggested_hardcover_slug=current_book.slug,
                 **edition_decision_payload(current_edition),
@@ -724,7 +794,14 @@ def decide_action(
                 reason="Actual ebook file author differs materially from the calibre author",
                 issue_category="real_mismatch",
                 suggested_calibre_title=record.calibre_title,
-                suggested_calibre_authors=file_work.authors,
+                suggested_calibre_authors=_preferred_metadata_authors(
+                    current_book,
+                    current_edition,
+                    secondary_book=best_book,
+                    secondary_edition=best_edition,
+                    file_authors=file_work.authors,
+                    fallback_authors=record.calibre_authors,
+                ),
                 suggested_hardcover_id=record.calibre_hardcover_id,
                 suggested_hardcover_slug=current_book.slug,
                 **edition_decision_payload(current_edition),
@@ -738,7 +815,14 @@ def decide_action(
                 reason="Actual ebook file fits the current Hardcover work but not the current calibre metadata",
                 issue_category="real_mismatch",
                 suggested_calibre_title=clean_title_for_matching(current_book.title),
-                suggested_calibre_authors=file_work.authors or record.calibre_authors,
+                suggested_calibre_authors=_preferred_metadata_authors(
+                    current_book,
+                    current_edition,
+                    secondary_book=best_book,
+                    secondary_edition=best_edition,
+                    file_authors=file_work.authors,
+                    fallback_authors=record.calibre_authors,
+                ),
                 suggested_hardcover_id=record.calibre_hardcover_id,
                 suggested_hardcover_slug=current_book.slug,
                 **edition_decision_payload(current_edition),
@@ -820,7 +904,12 @@ def decide_action(
             reason=f"manual_review:title_exact_author_unconfirmed; author_reason={explain_author_mismatch(file_work.authors, best_candidate_authors)}",
             issue_category="manual_review",
             suggested_calibre_title=clean_title_for_matching(best_book.title) if best_book else record.calibre_title,
-            suggested_calibre_authors=file_work.authors or record.calibre_authors,
+            suggested_calibre_authors=_preferred_metadata_authors(
+                best_book,
+                best_edition,
+                file_authors=file_work.authors,
+                fallback_authors=record.calibre_authors,
+            ),
             suggested_hardcover_id=str(best_book.id) if best_book else "",
             suggested_hardcover_slug=best_book.slug if best_book else "",
             **edition_decision_payload(best_edition),
