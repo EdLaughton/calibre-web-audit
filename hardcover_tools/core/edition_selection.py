@@ -14,8 +14,6 @@ from .text_normalization import (
     norm,
     smart_title,
 )
-from .work_classification import classify_hardcover_edition, classify_local_file_kind, work_kind_penalty
-from .work_matching import candidate_author_string
 
 EBOOKISH_EDITION_FORMAT_TOKENS = (
     "ebook",
@@ -148,36 +146,6 @@ def is_collectionish_edition(edition: HardcoverEdition) -> bool:
     return any(re.search(pattern, raw, re.I) for pattern in patterns)
 
 
-def edition_text_blob(edition: HardcoverEdition, book: Optional[HardcoverBook] = None) -> str:
-    parts = [
-        smart_title(edition.title or ""),
-        smart_title(edition.subtitle or ""),
-        smart_title(book.title or "") if book else "",
-    ]
-    return " ".join(part for part in parts if part).strip()
-
-
-def file_title_signals_non_prose(file_work: FileWork, book: Optional[HardcoverBook] = None) -> bool:
-    local_kind = classify_local_file_kind(file_work, None, "")
-    return local_kind not in {"prose_novel", "unknown"}
-
-
-def is_non_prose_or_adaptation_edition(edition: HardcoverEdition, book: Optional[HardcoverBook] = None) -> bool:
-    return classify_hardcover_edition(edition, book) not in {"prose_novel", "unknown"}
-
-
-def edition_side_material_penalty(edition: HardcoverEdition, file_work: FileWork, book: Optional[HardcoverBook] = None) -> float:
-    local_kind = classify_local_file_kind(file_work, None, "")
-    candidate_kind = classify_hardcover_edition(edition, book)
-    penalty = 0.0
-    if is_collectionish_edition(edition):
-        penalty += 40.0
-    penalty += work_kind_penalty(local_kind, candidate_kind) * 2.5
-    if not str(edition.language or "").strip():
-        penalty += 30.0
-    return penalty
-
-
 def identifier_candidates(record: BookRecord, embedded: EmbeddedMeta) -> set[str]:
     values: set[str] = set()
     for candidate in (
@@ -284,13 +252,6 @@ def edition_reason_parts(
         parts.append("marketing_title_penalty")
     if clean_title_bonus:
         parts.append("edition_title_clean")
-    penalty = edition_side_material_penalty(edition, file_work, book)
-    if penalty >= 150:
-        parts.append("non_prose_or_adaptation_penalty")
-    elif penalty >= 60:
-        parts.append("collectionish_penalty")
-    elif penalty > 0:
-        parts.append("metadata_quality_penalty")
     return parts
 
 
@@ -336,12 +297,12 @@ def edition_author_match_rank(
     file_work: FileWork,
     book: HardcoverBook,
 ) -> int:
-    edition_authors = author_match_set(candidate_author_string(book, edition))
-    target_authors = author_match_set(file_work.authors or candidate_author_string(book, None))
+    edition_authors = author_match_set(edition.authors)
+    target_authors = author_match_set(file_work.authors or book.authors)
     if not edition_authors or not target_authors:
         return 0
-    canonical_edition = set(canonical_author_set(candidate_author_string(book, edition)))
-    canonical_target = set(canonical_author_set(file_work.authors or candidate_author_string(book, None)))
+    canonical_edition = set(canonical_author_set(edition.authors))
+    canonical_target = set(canonical_author_set(file_work.authors or book.authors))
     if canonical_edition and canonical_target and canonical_edition == canonical_target:
         return 2
     if edition_authors & target_authors:
@@ -365,29 +326,30 @@ def edition_review_score(
     no_marketing: int,
     clean_title_bonus: int,
     edition: HardcoverEdition,
-    file_work: FileWork,
-    book: HardcoverBook,
 ) -> float:
     score = 0.0
-    score += id_match * 1200.0
-    score += non_audio * 260.0
-    score += language_ok * 180.0
-    score += explicit_english * 80.0
-    score += ebook_pref * 260.0
-    score += type_rank * 25.0
-    score += default_rank * 35.0
-    score += author_match * 130.0
-    score += clean_title_match * 220.0
-    score += no_collection * 15.0
-    score += no_marketing * 20.0
-    score -= unknown_language * 25.0
-    score += min(6.0, float(edition.score or 0) / 250.0)
-    score += min(3.0, float(edition.users_read_count or 0) / 50000.0)
-    score += min(2.0, float(edition.users_count or 0) / 50000.0)
-    score += min(2.0, float(edition.rating or 0.0) / 2.5)
-    score += min(1.0, float(edition.lists_count or 0) / 5000.0)
-    score += clean_title_bonus * 4.0
-    score -= edition_side_material_penalty(edition, file_work, book)
+    score += id_match * 1000.0
+    score += non_audio * 320.0
+    score += language_ok * 220.0
+    score += unknown_language * 20.0
+    score += default_rank * 170.0
+    score += ebook_pref * 220.0
+    score += type_rank * 90.0
+    score += explicit_english * 50.0
+    score += author_match * 40.0
+    score += clean_title_match * 30.0
+    score += no_collection * 20.0
+    score += no_marketing * 10.0
+    score += min(9.9, float(edition.score or 0) / 100.0)
+    score += min(4.9, float(edition.users_read_count or 0) / 10000.0)
+    score += min(3.9, float(edition.users_count or 0) / 10000.0)
+    score += min(5.0, float(edition.rating or 0.0))
+    score += min(2.9, float(edition.lists_count or 0) / 1000.0)
+    score += clean_title_bonus * 1.0
+    if ebook_pref and not is_ebookish_edition(edition):
+        score -= 120.0
+    if explicit_english and not language_ok:
+        score -= 40.0
     return round(score, 3)
 
 
@@ -405,14 +367,6 @@ def rank_candidate_editions(
     prefers_ebook = (record.file_format or "").upper() in set(PREFERRED_FORMATS)
     ranked: List[Tuple[Tuple[Any, ...], float, str, HardcoverEdition]] = []
     fallback: List[Tuple[Tuple[Any, ...], float, str, HardcoverEdition]] = []
-    viable_ebook_exists = False
-    local_kind = classify_local_file_kind(file_work, record, record.file_format)
-    if prefers_ebook:
-        for _candidate in editions:
-            candidate_kind = classify_hardcover_edition(_candidate, book)
-            if work_kind_penalty(local_kind, candidate_kind) == 0 and not is_audio_edition(_candidate) and edition_language_ok_rank(_candidate) and is_ebookish_edition(_candidate):
-                viable_ebook_exists = True
-                break
     for edition in editions:
         type_rank = edition_type_rank(edition)
         language_ok = edition_language_ok_rank(edition)
@@ -420,8 +374,6 @@ def rank_candidate_editions(
         explicit_english = edition_explicit_english_rank(edition)
         clean_title_match = 1 if clean_title_for_matching(edition.title or book.title) == file_clean else 0
         clean_title_bonus = 1 if smart_title(edition.title or "") == clean_title_for_matching(edition.title or "") else 0
-        candidate_kind = classify_hardcover_edition(edition, book)
-        kind_ok = 1 if work_kind_penalty(local_kind, candidate_kind) == 0 else 0
         id_match = 1 if any(
             identifier
             and identifier in {clean_isbn(edition.isbn_10), clean_isbn(edition.isbn_13), clean_isbn(edition.asin)}
@@ -433,10 +385,8 @@ def rank_candidate_editions(
         author_match = edition_author_match_rank(edition, file_work, book)
         no_collection = 1 if not is_collectionish_edition(edition) else 0
         no_marketing = 1 if title_marketing_penalty(" ".join([edition.title or "", edition.subtitle or ""]).strip()) == 0 else 0
-        non_ebook_penalty = 1 if prefers_ebook and not is_ebookish_edition(edition) else 0
         rank = (
             id_match,
-            kind_ok,
             clean_title_match,
             author_match,
             ebook_pref,
@@ -470,13 +420,7 @@ def rank_candidate_editions(
             no_marketing=no_marketing,
             clean_title_bonus=clean_title_bonus,
             edition=edition,
-            file_work=file_work,
-            book=book,
         )
-        if prefers_ebook and viable_ebook_exists and not is_ebookish_edition(edition):
-            review_score -= 220.0
-        elif prefers_ebook and not is_ebookish_edition(edition) and not is_audio_edition(edition):
-            review_score -= 60.0
         reason = edition_reason_text(
             record=record,
             file_work=file_work,
@@ -498,12 +442,7 @@ def rank_candidate_editions(
             clean_title_bonus=clean_title_bonus,
         )
         item = (rank, review_score, reason, edition)
-        primary_pool_ok = kind_ok and non_audio and language_ok
-        if primary_pool_ok and viable_ebook_exists and prefers_ebook:
-            primary_pool_ok = bool(is_ebookish_edition(edition))
-        elif primary_pool_ok:
-            primary_pool_ok = bool(type_rank > 0)
-        if primary_pool_ok:
+        if non_audio and type_rank > 0 and language_ok:
             ranked.append(item)
         else:
             fallback.append(item)
@@ -586,7 +525,7 @@ def book_selection_adjusted_score(
     score -= title_marketing_penalty(book.title)
     if preferred_edition:
         reading = norm(preferred_edition.reading_format)
-        score += 3.0 if is_ebookish_edition(preferred_edition) else 0.25 if reading == "read" else -0.5
+        score += 2.0 if is_ebookish_edition(preferred_edition) else 1.0 if reading == "read" else 0.0
         if edition_language_ok_rank(preferred_edition):
             score += 1.0
         elif edition_unknown_language_rank(preferred_edition):

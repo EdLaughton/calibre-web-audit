@@ -25,6 +25,13 @@ SERIES_SUFFIX_PATTERNS = [
     r"\s*-\s*[^-]*book\s+\d+[^-]*\s*$",
 ]
 
+
+SERIES_PREFIX_PATTERNS = [
+    r"^\s*(?:book|bk|vol(?:ume)?|part|episode|issue)\s+\d+(?:\.\d+)?\s*[-:–—]\s*",
+    r"^\s*\d+(?:\.\d+)?\s*[-:–—]\s*",
+    r"^\s*[^-:]{1,80}?\s+\d+(?:\.\d+)?\s*[-:–—]\s*",
+]
+
 MARKETING_SUFFIX_PATTERNS = [
     r"\s*:\s*A Novel\s*$",
     r"\s*\(With Bonus Chapter\)\s*$",
@@ -131,11 +138,25 @@ def normalize_author_key(name: str, alias_map: Optional[Mapping[str, str]] = Non
     return aliases.get(key, key)
 
 
+def _strip_series_prefixes(title: str) -> str:
+    current = smart_title(title)
+    changed = True
+    while changed and current:
+        changed = False
+        for pattern in SERIES_PREFIX_PATTERNS:
+            new_title = re.sub(pattern, '', current, flags=re.I).strip()
+            if new_title and new_title != current:
+                current = new_title
+                changed = True
+                break
+    return current
+
+
 def clean_title_for_matching(title: str) -> str:
     raw = smart_title(title)
     if not raw:
         return ""
-    current = raw
+    current = _strip_series_prefixes(raw)
     if current.startswith("[") and current.endswith("]"):
         current = current[1:-1].strip()
 
@@ -205,6 +226,7 @@ def title_query_variants(title: str) -> List[str]:
     raw = smart_title(title)
     for candidate in [
         raw,
+        _strip_series_prefixes(raw),
         clean_title_for_matching(title),
         re.sub(r"\s*\([^)]*\)\s*$", "", raw).strip(" -:;,.[ ]"),
         re.sub(r":\s*(A Novel|With Bonus Chapter|The World of .+)$", "", raw, flags=re.I).strip(" -:;,.[ ]"),

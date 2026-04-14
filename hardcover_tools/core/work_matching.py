@@ -92,18 +92,9 @@ def score_work_candidate(
         total += 1.0
 
     local_kind = classify_local_file_kind(file_work, record, record.file_format)
-    candidate_kind = classify_hardcover_book(hardcover_book, None)
+    candidate_kind = classify_hardcover_book(hardcover_book, preferred_edition)
     kind_penalty = work_kind_penalty(local_kind, candidate_kind)
     total -= kind_penalty
-    normalized_same_title = title_normalization_candidate(record.calibre_title, hardcover_book.title) or (
-        bool(file_work.title) and clean_title_for_matching(file_work.title) == clean_title_for_matching(hardcover_book.title)
-    )
-    if title_score < 0.65 and not normalized_same_title:
-        total -= 18.0
-    if title_score < 0.50 and not normalized_same_title:
-        total -= 28.0
-    if title_score < 0.35 and not normalized_same_title:
-        total -= 45.0
     if title_normalization_candidate(record.calibre_title, hardcover_book.title) and author_score >= 0.90:
         total += 4.0
 
@@ -127,14 +118,30 @@ def score_work_candidate(
         reasons.append('audio-edition')
     if title_normalization_candidate(record.calibre_title, hardcover_book.title):
         reasons.append('decorated-title')
-    if title_score < 0.65 and not normalized_same_title:
-        reasons.append('weak-title')
     if kind_penalty >= 50:
         reasons.append(f'kind-conflict:{candidate_kind}')
     elif candidate_kind and candidate_kind != 'unknown':
         reasons.append(f'kind:{candidate_kind}')
     return total, MatchScores(round(title_score, 3), round(author_score, 3), round(series_score, 3), total), ','.join(reasons)
 
+
+
+
+def _decorated_title_requires_strictness(record: BookRecord, book: Optional[HardcoverBook]) -> bool:
+    if not book:
+        return False
+    return title_normalization_candidate(record.calibre_title, book.title)
+
+
+def _looks_like_bad_wrapper_work(book: Optional[HardcoverBook], edition: Optional[HardcoverEdition], record: BookRecord) -> bool:
+    if not book:
+        return False
+    title_norm = norm(book.title)
+    raw_title = smart_title(book.title)
+    if title_normalization_candidate(record.calibre_title, book.title) and (' #' in raw_title or title_marketing_penalty(raw_title) > 0):
+        return True
+    contributors = contributor_count(candidate_author_string(book, edition))
+    return contributors >= 2 and title_normalization_candidate(record.calibre_title, book.title) and ('files' in title_norm or 'graphic' in title_norm)
 
 def is_strong_work_match(
     *,
@@ -148,17 +155,21 @@ def is_strong_work_match(
 ) -> bool:
     if not book:
         return False
-    candidate_kind = classify_hardcover_book(book, None)
+    candidate_kind = classify_hardcover_book(book, edition)
     local_kind = classify_local_file_kind(file_work, record, record.file_format)
     if work_kind_penalty(local_kind, candidate_kind) >= 50.0:
         return False
-    if score < 86.0:
+    if _looks_like_bad_wrapper_work(book, edition, record) and breakdown.title_score < 0.95:
+        return False
+    if score < 85.0:
         return False
     if breakdown.author_score < 0.90:
         return False
     if breakdown.title_score >= 0.95:
         return True
     if breakdown.title_score >= 0.90 and 'close-title' in why:
+        return True
+    if _decorated_title_requires_strictness(record, book) and breakdown.title_score >= 0.92 and breakdown.author_score >= 0.90:
         return True
     return False
 
@@ -175,15 +186,24 @@ def is_tolerable_work_match(
 ) -> bool:
     if not book:
         return False
-    candidate_kind = classify_hardcover_book(book, None)
+    candidate_kind = classify_hardcover_book(book, edition)
     local_kind = classify_local_file_kind(file_work, record, record.file_format)
     if work_kind_penalty(local_kind, candidate_kind) >= 50.0:
         return False
-    if score < 80.0:
+    if _looks_like_bad_wrapper_work(book, edition, record) and breakdown.title_score < 0.95:
         return False
-    if breakdown.title_score >= 0.88 and breakdown.author_score >= 0.85:
+    if score < 78.0:
+        return False
+    decorated = _decorated_title_requires_strictness(record, book)
+    if decorated:
+        if breakdown.title_score >= 0.90 and breakdown.author_score >= 0.85:
+            return True
+        if breakdown.title_score >= 0.95 and breakdown.author_score >= 0.50:
+            return True
+        return False
+    if breakdown.title_score >= 0.85 and breakdown.author_score >= 0.85:
         return True
-    if breakdown.title_score >= 0.78 and breakdown.author_score >= 0.95:
+    if breakdown.title_score >= 0.70 and breakdown.author_score >= 0.95:
         return True
     if title_normalization_candidate(record.calibre_title, book.title) and breakdown.author_score >= 0.95:
         return True

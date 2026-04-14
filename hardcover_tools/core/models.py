@@ -56,30 +56,6 @@ class FileWork:
 
 
 @dataclass
-class HardcoverContribution:
-    author_name: str
-    contribution: str = ""
-    normalized_role: str = ""
-    is_primary: bool = False
-
-
-@dataclass
-class HardcoverSeriesMembership:
-    series_id: int = 0
-    series_name: str = ""
-    series_slug: str = ""
-    position: Optional[float] = None
-    details: str = ""
-    featured: bool = False
-    compilation: bool = False
-    raw_series_id: int = 0
-    raw_series_name: str = ""
-    is_completed: Optional[bool] = None
-    books_count: Optional[int] = None
-    primary_books_count: Optional[int] = None
-
-
-@dataclass
 class HardcoverBook:
     id: int
     title: str
@@ -96,21 +72,6 @@ class HardcoverBook:
     default_physical_edition_id: int = 0
     default_audio_edition_id: int = 0
     default_cover_edition_id: int = 0
-    contributions: List[HardcoverContribution] = field(default_factory=list)
-    primary_authors: List[str] = field(default_factory=list)
-    secondary_contributors: List[str] = field(default_factory=list)
-    narrators: List[str] = field(default_factory=list)
-    adapters: List[str] = field(default_factory=list)
-    illustrators: List[str] = field(default_factory=list)
-    editors: List[str] = field(default_factory=list)
-    translators: List[str] = field(default_factory=list)
-    series_memberships: List[HardcoverSeriesMembership] = field(default_factory=list)
-    canonical_id: int = 0
-    compilation: Optional[bool] = None
-    is_partial_book: Optional[bool] = None
-    parent_book_id: int = 0
-    literary_type_id: int = 0
-    work_kind: str = "unknown"
 
 
 @dataclass
@@ -134,17 +95,6 @@ class HardcoverEdition:
     edition_format: str = ""
     reading_format: str = ""
     language: str = ""
-    contributions: List[HardcoverContribution] = field(default_factory=list)
-    primary_authors: List[str] = field(default_factory=list)
-    secondary_contributors: List[str] = field(default_factory=list)
-    narrators: List[str] = field(default_factory=list)
-    adapters: List[str] = field(default_factory=list)
-    illustrators: List[str] = field(default_factory=list)
-    editors: List[str] = field(default_factory=list)
-    translators: List[str] = field(default_factory=list)
-    reading_format_id: int = 0
-    language_id: int = 0
-    work_kind: str = "unknown"
 
 
 @dataclass
