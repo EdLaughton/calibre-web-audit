@@ -510,6 +510,11 @@ def choose_best_candidate(
         preferred = edition_choice.chosen
         score, breakdown, why = score_candidate_against_file(file_work, record, book, preferred)
         adjusted = book_selection_adjusted_score(score, file_work, book, preferred)
+        normalized_same_title = bool(file_work.title and clean_title_for_matching(file_work.title) == clean_title_for_matching(book.title)) or _title_normalization_candidate(record.calibre_title, book.title)
+        if breakdown.title_score < 0.55 and not normalized_same_title:
+            adjusted -= 60.0
+        elif breakdown.title_score < 0.70 and breakdown.author_score < 0.98 and not normalized_same_title:
+            adjusted -= 22.0
         scored.append((adjusted, breakdown, why, book, edition_choice))
     scored.sort(key=lambda item: item[0], reverse=True)
     if verbose and scored:
@@ -521,7 +526,7 @@ def choose_best_candidate(
                 if edition
                 else ""
             )
-            preview.append(f"{compact_book_marker(book)} score={score:.2f}{suffix}")
+            preview.append(f"{compact_book_marker(book)} score={score:.2f} title={_breakdown.title_score:.2f} author={_breakdown.author_score:.2f}{suffix}")
         vlog(verbose, f"  search candidates={preview}")
     if not scored:
         return None, EditionChoiceInfo(), 0.0, MatchScores(), "no-book-details"

@@ -33,12 +33,6 @@ MARKETING_SUFFIX_PATTERNS = [
     r"\s*Series By [^-]+ collection Set\s*$",
 ]
 
-SERIES_PREFIX_PATTERNS = [
-    r"^\s*(?:book|bk|vol(?:ume)?|part|episode|issue)\s+\d+(?:\.\d+)?\s*[-:–—]\s*",
-    r"^\s*\d+(?:\.\d+)?\s*[-:–—]\s*",
-    r"^\s*[^-:]{1,80}?\s+\d+(?:\.\d+)?\s*[-:–—]\s*",
-]
-
 TRAILING_METADATA_KEYWORDS = {
     "book",
     "series",
@@ -161,29 +155,10 @@ def clean_title_for_matching(title: str) -> str:
             elif canonical in words:
                 return True
         return (
-            bool(re.search(r"(?:book|series|vol(?:ume)?|part|episode|issue)\s+\d+(?:\.\d+)?", normalized))
-            or bool(re.search(r"(?:collection\s+set|box\s+set|omnibus|edition)", normalized))
-            or bool(re.search(r"a\s+novel", normalized))
+            bool(re.search(r"\b(?:book|series)\s+\d+\b", normalized))
+            or bool(re.search(r"\b(?:collection\s+set|box\s+set|omnibus|edition)\b", normalized))
+            or bool(re.search(r"\ba\s+novel\b", normalized))
         )
-
-    def looks_title_like(value: str) -> bool:
-        candidate = smart_title(value)
-        if not candidate:
-            return False
-        normalized = norm(candidate)
-        if len(normalized) < 3:
-            return False
-        if not re.search(r"[A-Za-z]", candidate):
-            return False
-        return True
-
-    def strip_leading_series_prefix(value: str) -> str:
-        current_value = value
-        for pattern in SERIES_PREFIX_PATTERNS:
-            new_value = re.sub(pattern, "", current_value, flags=re.I).strip()
-            if new_value != current_value and looks_title_like(new_value):
-                return new_value
-        return current_value
 
     changed = True
     while changed and current:
@@ -206,11 +181,6 @@ def clean_title_for_matching(title: str) -> str:
                 break
         if changed:
             continue
-        new_title = strip_leading_series_prefix(current)
-        if new_title != current:
-            current = new_title
-            changed = True
-            continue
         match = re.search(r"\s*\(([^()]*)\)\s*$", current)
         if match:
             inner = match.group(1).strip()
@@ -219,7 +189,7 @@ def clean_title_for_matching(title: str) -> str:
                 current = current[: match.start()].strip()
                 changed = True
                 continue
-        match = re.search(r"\s*[-–—:]\s*([^-–—:]+)\s*$", current)
+        match = re.search(r"\s*-\s*([^-]+)\s*$", current)
         if match and tail_has_metadata_keywords(match.group(1).strip()):
             current = current[: match.start()].strip()
             changed = True
@@ -238,10 +208,7 @@ def title_query_variants(title: str) -> List[str]:
         clean_title_for_matching(title),
         re.sub(r"\s*\([^)]*\)\s*$", "", raw).strip(" -:;,.[ ]"),
         re.sub(r":\s*(A Novel|With Bonus Chapter|The World of .+)$", "", raw, flags=re.I).strip(" -:;,.[ ]"),
-        re.sub(r"^\s*(?:book|bk|vol(?:ume)?|part|episode|issue)\s+\d+(?:\.\d+)?\s*[-:–—]\s*", "", raw, flags=re.I).strip(" -:;,.[ ]"),
-        re.sub(r"^\s*\d+(?:\.\d+)?\s*[-:–—]\s*", "", raw, flags=re.I).strip(" -:;,.[ ]"),
-        re.sub(r"^\s*[^-:]{1,80}?\s+\d+(?:\.\d+)?\s*[-:–—]\s*", "", raw, flags=re.I).strip(" -:;,.[ ]"),
-        re.sub(r"\s*[-–—:]\s*[^-–—:]*(?:series|book)\s+\d+[^-–—:]*$", "", raw, flags=re.I).strip(" -:;,.[ ]"),
+        re.sub(r"\s*-\s*[^-]*(?:series|book)\s+\d+[^-]*$", "", raw, flags=re.I).strip(" -:;,.[ ]"),
     ]:
         candidate = smart_title(candidate)
         candidate = re.sub(r"\s+", " ", candidate).strip(" -:;,.[]")

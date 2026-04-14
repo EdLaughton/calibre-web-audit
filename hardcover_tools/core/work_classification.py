@@ -62,13 +62,16 @@ def classify_local_file_kind(file_work: FileWork, record: Optional[BookRecord] =
 def classify_hardcover_book(book: Optional[HardcoverBook], preferred_edition: Optional[HardcoverEdition] = None) -> str:
     if not book and not preferred_edition:
         return "unknown"
-    contributions = list(getattr(preferred_edition, 'contributions', []) or []) + list(getattr(book, 'contributions', []) or [])
+    book_contributions = list(getattr(book, 'contributions', []) or [])
+    edition_contributions = list(getattr(preferred_edition, 'contributions', []) or [])
     text = _text_blob(
         getattr(preferred_edition, 'title', ''),
         getattr(preferred_edition, 'subtitle', ''),
         getattr(book, 'title', ''),
         getattr(book, 'subtitle', ''),
     )
+    # Work-level classification should be conservative. Do not classify an otherwise ordinary
+    # prose work as an audiobook merely because some book-level contributions include narrators.
     if preferred_edition and ((preferred_edition.audio_seconds or 0) > 0 or 'audio' in norm(preferred_edition.reading_format) or 'audio' in norm(preferred_edition.edition_format)):
         return 'audiobook'
     if getattr(book, 'compilation', None) is True or COLLECTION_PATTERNS.search(text):
@@ -77,11 +80,20 @@ def classify_hardcover_book(book: Optional[HardcoverBook], preferred_edition: Op
         return 'partial_work'
     if PARTIAL_PATTERNS.search(text):
         return 'partial_work'
-    if _has_role(contributions, AUDIO_ROLE_PATTERNS):
-        return 'audiobook'
-    if _has_role(contributions, ADAPTATION_ROLE_PATTERNS) or _has_role(contributions, VISUAL_ROLE_PATTERNS) or GRAPHIC_PATTERNS.search(text):
+    # Prefer explicit title/subtitle signals and edition-specific contributor roles.
+    if GRAPHIC_PATTERNS.search(text):
         return 'graphic_adaptation'
-    if COMPANION_PATTERNS.search(text) or _has_role(contributions, EDITORIAL_ROLE_PATTERNS):
+    if COMPANION_PATTERNS.search(text):
+        return 'companion_reference'
+    if edition_contributions and (_has_role(edition_contributions, ADAPTATION_ROLE_PATTERNS) or _has_role(edition_contributions, VISUAL_ROLE_PATTERNS)):
+        return 'graphic_adaptation'
+    if edition_contributions and _has_role(edition_contributions, EDITORIAL_ROLE_PATTERNS):
+        return 'companion_reference'
+    # Book-level role-only classification is a last resort and only when there are no primary authors.
+    book_primary = primary_contributor_names(book_contributions)
+    if not book_primary and (_has_role(book_contributions, ADAPTATION_ROLE_PATTERNS) or _has_role(book_contributions, VISUAL_ROLE_PATTERNS)):
+        return 'graphic_adaptation'
+    if not book_primary and _has_role(book_contributions, EDITORIAL_ROLE_PATTERNS):
         return 'companion_reference'
     return 'prose_novel'
 
@@ -89,8 +101,19 @@ def classify_hardcover_book(book: Optional[HardcoverBook], preferred_edition: Op
 def classify_hardcover_edition(edition: Optional[HardcoverEdition], book: Optional[HardcoverBook] = None) -> str:
     if not edition:
         return classify_hardcover_book(book, None)
-    kind = classify_hardcover_book(book, edition)
-    return kind
+    text = _text_blob(getattr(edition, 'title', ''), getattr(edition, 'subtitle', ''), getattr(book, 'title', ''), getattr(book, 'subtitle', ''))
+    contributions = list(getattr(edition, 'contributions', []) or [])
+    if (edition.audio_seconds or 0) > 0 or 'audio' in norm(edition.reading_format) or 'audio' in norm(edition.edition_format):
+        return 'audiobook'
+    if is_collection := COLLECTION_PATTERNS.search(text):
+        return 'anthology_collection'
+    if PARTIAL_PATTERNS.search(text):
+        return 'partial_work'
+    if GRAPHIC_PATTERNS.search(text) or _has_role(contributions, ADAPTATION_ROLE_PATTERNS) or _has_role(contributions, VISUAL_ROLE_PATTERNS):
+        return 'graphic_adaptation'
+    if COMPANION_PATTERNS.search(text) or _has_role(contributions, EDITORIAL_ROLE_PATTERNS):
+        return 'companion_reference'
+    return classify_hardcover_book(book, None)
 
 
 def work_kinds_compatible(local_kind: str, candidate_kind: str) -> bool:

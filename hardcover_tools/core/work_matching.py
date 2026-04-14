@@ -92,9 +92,18 @@ def score_work_candidate(
         total += 1.0
 
     local_kind = classify_local_file_kind(file_work, record, record.file_format)
-    candidate_kind = classify_hardcover_book(hardcover_book, preferred_edition)
+    candidate_kind = classify_hardcover_book(hardcover_book, None)
     kind_penalty = work_kind_penalty(local_kind, candidate_kind)
     total -= kind_penalty
+    normalized_same_title = title_normalization_candidate(record.calibre_title, hardcover_book.title) or (
+        bool(file_work.title) and clean_title_for_matching(file_work.title) == clean_title_for_matching(hardcover_book.title)
+    )
+    if title_score < 0.65 and not normalized_same_title:
+        total -= 18.0
+    if title_score < 0.50 and not normalized_same_title:
+        total -= 28.0
+    if title_score < 0.35 and not normalized_same_title:
+        total -= 45.0
     if title_normalization_candidate(record.calibre_title, hardcover_book.title) and author_score >= 0.90:
         total += 4.0
 
@@ -118,6 +127,8 @@ def score_work_candidate(
         reasons.append('audio-edition')
     if title_normalization_candidate(record.calibre_title, hardcover_book.title):
         reasons.append('decorated-title')
+    if title_score < 0.65 and not normalized_same_title:
+        reasons.append('weak-title')
     if kind_penalty >= 50:
         reasons.append(f'kind-conflict:{candidate_kind}')
     elif candidate_kind and candidate_kind != 'unknown':
@@ -137,11 +148,11 @@ def is_strong_work_match(
 ) -> bool:
     if not book:
         return False
-    candidate_kind = classify_hardcover_book(book, edition)
+    candidate_kind = classify_hardcover_book(book, None)
     local_kind = classify_local_file_kind(file_work, record, record.file_format)
     if work_kind_penalty(local_kind, candidate_kind) >= 50.0:
         return False
-    if score < 85.0:
+    if score < 86.0:
         return False
     if breakdown.author_score < 0.90:
         return False
@@ -164,15 +175,15 @@ def is_tolerable_work_match(
 ) -> bool:
     if not book:
         return False
-    candidate_kind = classify_hardcover_book(book, edition)
+    candidate_kind = classify_hardcover_book(book, None)
     local_kind = classify_local_file_kind(file_work, record, record.file_format)
     if work_kind_penalty(local_kind, candidate_kind) >= 50.0:
         return False
-    if score < 78.0:
+    if score < 80.0:
         return False
-    if breakdown.title_score >= 0.85 and breakdown.author_score >= 0.85:
+    if breakdown.title_score >= 0.88 and breakdown.author_score >= 0.85:
         return True
-    if breakdown.title_score >= 0.70 and breakdown.author_score >= 0.95:
+    if breakdown.title_score >= 0.78 and breakdown.author_score >= 0.95:
         return True
     if title_normalization_candidate(record.calibre_title, book.title) and breakdown.author_score >= 0.95:
         return True

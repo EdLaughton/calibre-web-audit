@@ -1094,7 +1094,8 @@ class HardcoverClient:
 
     def _book_from_node(self, book_node: Dict[str, Any]) -> HardcoverBook:
         contributions = _contributions_from_nodes(book_node.get("contributions") or [])
-        authors = authors_from_contributions(book_node.get("contributions") or [])
+        primary_authors = _contribution_names(contributions, "primary")
+        authors = " & ".join(primary_authors) if primary_authors else authors_from_contributions(book_node.get("contributions") or [])
         series_memberships = _series_memberships_from_nodes(book_node.get("book_series") or [])
         series_parts = []
         for membership in series_memberships:
@@ -1117,7 +1118,7 @@ class HardcoverClient:
             default_audio_edition_id=int(book_node.get("default_audio_edition_id") or 0),
             default_cover_edition_id=int(book_node.get("default_cover_edition_id") or 0),
             contributions=contributions,
-            primary_authors=_contribution_names(contributions, "primary"),
+            primary_authors=primary_authors,
             secondary_contributors=_contribution_names(contributions),
             narrators=_contribution_names(contributions, "narrator"),
             adapters=_contribution_names(contributions, "adapter"),
@@ -1131,7 +1132,8 @@ class HardcoverClient:
 
     def _edition_from_node(self, edition_node: Dict[str, Any], book_id: int) -> HardcoverEdition:
         contributions = _contributions_from_nodes(edition_node.get("contributions") or [])
-        authors = authors_from_contributions(edition_node.get("contributions") or [])
+        primary_authors = _contribution_names(contributions, "primary")
+        authors = " & ".join(primary_authors) if primary_authors else authors_from_contributions(edition_node.get("contributions") or [])
         edition = HardcoverEdition(
             id=int(edition_node.get("id")),
             book_id=book_id,
@@ -1153,7 +1155,7 @@ class HardcoverClient:
             reading_format=((edition_node.get("reading_format") or {}).get("format") or ""),
             language=((edition_node.get("language") or {}).get("language") or ""),
             contributions=contributions,
-            primary_authors=_contribution_names(contributions, "primary"),
+            primary_authors=primary_authors,
             secondary_contributors=_contribution_names(contributions),
             narrators=_contribution_names(contributions, "narrator"),
             adapters=_contribution_names(contributions, "adapter"),

@@ -373,9 +373,9 @@ def edition_review_score(
     score += non_audio * 260.0
     score += language_ok * 180.0
     score += explicit_english * 80.0
-    score += ebook_pref * 100.0
-    score += type_rank * 40.0
-    score += default_rank * 70.0
+    score += ebook_pref * 260.0
+    score += type_rank * 25.0
+    score += default_rank * 35.0
     score += author_match * 130.0
     score += clean_title_match * 220.0
     score += no_collection * 15.0
@@ -405,6 +405,14 @@ def rank_candidate_editions(
     prefers_ebook = (record.file_format or "").upper() in set(PREFERRED_FORMATS)
     ranked: List[Tuple[Tuple[Any, ...], float, str, HardcoverEdition]] = []
     fallback: List[Tuple[Tuple[Any, ...], float, str, HardcoverEdition]] = []
+    viable_ebook_exists = False
+    local_kind = classify_local_file_kind(file_work, record, record.file_format)
+    if prefers_ebook:
+        for _candidate in editions:
+            candidate_kind = classify_hardcover_edition(_candidate, book)
+            if work_kind_penalty(local_kind, candidate_kind) == 0 and not is_audio_edition(_candidate) and edition_language_ok_rank(_candidate) and is_ebookish_edition(_candidate):
+                viable_ebook_exists = True
+                break
     for edition in editions:
         type_rank = edition_type_rank(edition)
         language_ok = edition_language_ok_rank(edition)
@@ -412,7 +420,6 @@ def rank_candidate_editions(
         explicit_english = edition_explicit_english_rank(edition)
         clean_title_match = 1 if clean_title_for_matching(edition.title or book.title) == file_clean else 0
         clean_title_bonus = 1 if smart_title(edition.title or "") == clean_title_for_matching(edition.title or "") else 0
-        local_kind = classify_local_file_kind(file_work, record, record.file_format)
         candidate_kind = classify_hardcover_edition(edition, book)
         kind_ok = 1 if work_kind_penalty(local_kind, candidate_kind) == 0 else 0
         id_match = 1 if any(
@@ -426,6 +433,7 @@ def rank_candidate_editions(
         author_match = edition_author_match_rank(edition, file_work, book)
         no_collection = 1 if not is_collectionish_edition(edition) else 0
         no_marketing = 1 if title_marketing_penalty(" ".join([edition.title or "", edition.subtitle or ""]).strip()) == 0 else 0
+        non_ebook_penalty = 1 if prefers_ebook and not is_ebookish_edition(edition) else 0
         rank = (
             id_match,
             kind_ok,
@@ -465,6 +473,10 @@ def rank_candidate_editions(
             file_work=file_work,
             book=book,
         )
+        if prefers_ebook and viable_ebook_exists and not is_ebookish_edition(edition):
+            review_score -= 220.0
+        elif prefers_ebook and not is_ebookish_edition(edition) and not is_audio_edition(edition):
+            review_score -= 60.0
         reason = edition_reason_text(
             record=record,
             file_work=file_work,
@@ -486,7 +498,12 @@ def rank_candidate_editions(
             clean_title_bonus=clean_title_bonus,
         )
         item = (rank, review_score, reason, edition)
-        if kind_ok and non_audio and type_rank > 0 and language_ok:
+        primary_pool_ok = kind_ok and non_audio and language_ok
+        if primary_pool_ok and viable_ebook_exists and prefers_ebook:
+            primary_pool_ok = bool(is_ebookish_edition(edition))
+        elif primary_pool_ok:
+            primary_pool_ok = bool(type_rank > 0)
+        if primary_pool_ok:
             ranked.append(item)
         else:
             fallback.append(item)
@@ -569,7 +586,7 @@ def book_selection_adjusted_score(
     score -= title_marketing_penalty(book.title)
     if preferred_edition:
         reading = norm(preferred_edition.reading_format)
-        score += 2.0 if is_ebookish_edition(preferred_edition) else 1.0 if reading == "read" else 0.0
+        score += 3.0 if is_ebookish_edition(preferred_edition) else 0.25 if reading == "read" else -0.5
         if edition_language_ok_rank(preferred_edition):
             score += 1.0
         elif edition_unknown_language_rank(preferred_edition):
