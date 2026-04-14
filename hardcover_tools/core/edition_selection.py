@@ -146,6 +146,54 @@ def is_collectionish_edition(edition: HardcoverEdition) -> bool:
     return any(re.search(pattern, raw, re.I) for pattern in patterns)
 
 
+def edition_text_blob(edition: HardcoverEdition, book: Optional[HardcoverBook] = None) -> str:
+    parts = [
+        smart_title(edition.title or ""),
+        smart_title(edition.subtitle or ""),
+        smart_title(book.title or "") if book else "",
+    ]
+    return " ".join(part for part in parts if part).strip()
+
+
+def file_title_signals_non_prose(file_work: FileWork, book: Optional[HardcoverBook] = None) -> bool:
+    raw = smart_title(file_work.title or (book.title if book else ""))
+    if not raw:
+        return False
+    return bool(re.search(r"(graphic\s+novel|graphic|comic|comics|manga|omnibus|collection|anthology|guide|companion|adaptation|illustrated)", raw, re.I))
+
+
+def is_non_prose_or_adaptation_edition(edition: HardcoverEdition, book: Optional[HardcoverBook] = None) -> bool:
+    raw = edition_text_blob(edition, book)
+    if not raw:
+        return False
+    patterns = [
+        r"graphic\s+novel",
+        r"graphic",
+        r"comic(?:s)?",
+        r"manga",
+        r"adaptation",
+        r"adapted",
+        r"illustrated",
+        r"companion",
+        r"guide",
+        r"script",
+        r"screenplay",
+        r"annotated",
+    ]
+    return any(re.search(pattern, raw, re.I) for pattern in patterns)
+
+
+def edition_side_material_penalty(edition: HardcoverEdition, file_work: FileWork, book: Optional[HardcoverBook] = None) -> float:
+    penalty = 0.0
+    if is_collectionish_edition(edition):
+        penalty += 60.0
+    if is_non_prose_or_adaptation_edition(edition, book) and not file_title_signals_non_prose(file_work, book):
+        penalty += 180.0
+    if not str(edition.language or "").strip():
+        penalty += 30.0
+    return penalty
+
+
 def identifier_candidates(record: BookRecord, embedded: EmbeddedMeta) -> set[str]:
     values: set[str] = set()
     for candidate in (
@@ -252,6 +300,13 @@ def edition_reason_parts(
         parts.append("marketing_title_penalty")
     if clean_title_bonus:
         parts.append("edition_title_clean")
+    penalty = edition_side_material_penalty(edition, file_work, book)
+    if penalty >= 150:
+        parts.append("non_prose_or_adaptation_penalty")
+    elif penalty >= 60:
+        parts.append("collectionish_penalty")
+    elif penalty > 0:
+        parts.append("metadata_quality_penalty")
     return parts
 
 
@@ -326,26 +381,29 @@ def edition_review_score(
     no_marketing: int,
     clean_title_bonus: int,
     edition: HardcoverEdition,
+    file_work: FileWork,
+    book: HardcoverBook,
 ) -> float:
     score = 0.0
-    score += id_match * 1000.0
-    score += non_audio * 320.0
-    score += language_ok * 220.0
-    score += unknown_language * 20.0
-    score += default_rank * 190.0
-    score += ebook_pref * 120.0
-    score += type_rank * 80.0
-    score += explicit_english * 50.0
-    score += author_match * 40.0
-    score += clean_title_match * 30.0
-    score += no_collection * 20.0
-    score += no_marketing * 10.0
-    score += min(9.9, float(edition.score or 0) / 100.0)
-    score += min(4.9, float(edition.users_read_count or 0) / 10000.0)
-    score += min(3.9, float(edition.users_count or 0) / 10000.0)
-    score += min(5.0, float(edition.rating or 0.0))
-    score += min(2.9, float(edition.lists_count or 0) / 1000.0)
-    score += clean_title_bonus * 1.0
+    score += id_match * 1200.0
+    score += non_audio * 260.0
+    score += language_ok * 180.0
+    score += explicit_english * 80.0
+    score += ebook_pref * 100.0
+    score += type_rank * 40.0
+    score += default_rank * 70.0
+    score += author_match * 130.0
+    score += clean_title_match * 220.0
+    score += no_collection * 15.0
+    score += no_marketing * 20.0
+    score -= unknown_language * 25.0
+    score += min(6.0, float(edition.score or 0) / 250.0)
+    score += min(3.0, float(edition.users_read_count or 0) / 50000.0)
+    score += min(2.0, float(edition.users_count or 0) / 50000.0)
+    score += min(2.0, float(edition.rating or 0.0) / 2.5)
+    score += min(1.0, float(edition.lists_count or 0) / 5000.0)
+    score += clean_title_bonus * 4.0
+    score -= edition_side_material_penalty(edition, file_work, book)
     return round(score, 3)
 
 
@@ -416,6 +474,8 @@ def rank_candidate_editions(
             no_marketing=no_marketing,
             clean_title_bonus=clean_title_bonus,
             edition=edition,
+            file_work=file_work,
+            book=book,
         )
         reason = edition_reason_text(
             record=record,
