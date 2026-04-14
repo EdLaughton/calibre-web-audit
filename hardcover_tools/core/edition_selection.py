@@ -14,6 +14,8 @@ from .text_normalization import (
     norm,
     smart_title,
 )
+from .work_classification import classify_hardcover_edition, classify_local_file_kind, work_kind_penalty
+from .work_matching import candidate_author_string
 
 EBOOKISH_EDITION_FORMAT_TOKENS = (
     "ebook",
@@ -156,39 +158,21 @@ def edition_text_blob(edition: HardcoverEdition, book: Optional[HardcoverBook] =
 
 
 def file_title_signals_non_prose(file_work: FileWork, book: Optional[HardcoverBook] = None) -> bool:
-    raw = smart_title(file_work.title or (book.title if book else ""))
-    if not raw:
-        return False
-    return bool(re.search(r"(graphic\s+novel|graphic|comic|comics|manga|omnibus|collection|anthology|guide|companion|adaptation|illustrated)", raw, re.I))
+    local_kind = classify_local_file_kind(file_work, None, "")
+    return local_kind not in {"prose_novel", "unknown"}
 
 
 def is_non_prose_or_adaptation_edition(edition: HardcoverEdition, book: Optional[HardcoverBook] = None) -> bool:
-    raw = edition_text_blob(edition, book)
-    if not raw:
-        return False
-    patterns = [
-        r"graphic\s+novel",
-        r"graphic",
-        r"comic(?:s)?",
-        r"manga",
-        r"adaptation",
-        r"adapted",
-        r"illustrated",
-        r"companion",
-        r"guide",
-        r"script",
-        r"screenplay",
-        r"annotated",
-    ]
-    return any(re.search(pattern, raw, re.I) for pattern in patterns)
+    return classify_hardcover_edition(edition, book) not in {"prose_novel", "unknown"}
 
 
 def edition_side_material_penalty(edition: HardcoverEdition, file_work: FileWork, book: Optional[HardcoverBook] = None) -> float:
+    local_kind = classify_local_file_kind(file_work, None, "")
+    candidate_kind = classify_hardcover_edition(edition, book)
     penalty = 0.0
     if is_collectionish_edition(edition):
-        penalty += 60.0
-    if is_non_prose_or_adaptation_edition(edition, book) and not file_title_signals_non_prose(file_work, book):
-        penalty += 180.0
+        penalty += 40.0
+    penalty += work_kind_penalty(local_kind, candidate_kind) * 2.5
     if not str(edition.language or "").strip():
         penalty += 30.0
     return penalty
@@ -352,12 +336,12 @@ def edition_author_match_rank(
     file_work: FileWork,
     book: HardcoverBook,
 ) -> int:
-    edition_authors = author_match_set(edition.authors)
-    target_authors = author_match_set(file_work.authors or book.authors)
+    edition_authors = author_match_set(candidate_author_string(book, edition))
+    target_authors = author_match_set(file_work.authors or candidate_author_string(book, None))
     if not edition_authors or not target_authors:
         return 0
-    canonical_edition = set(canonical_author_set(edition.authors))
-    canonical_target = set(canonical_author_set(file_work.authors or book.authors))
+    canonical_edition = set(canonical_author_set(candidate_author_string(book, edition)))
+    canonical_target = set(canonical_author_set(file_work.authors or candidate_author_string(book, None)))
     if canonical_edition and canonical_target and canonical_edition == canonical_target:
         return 2
     if edition_authors & target_authors:
@@ -428,6 +412,9 @@ def rank_candidate_editions(
         explicit_english = edition_explicit_english_rank(edition)
         clean_title_match = 1 if clean_title_for_matching(edition.title or book.title) == file_clean else 0
         clean_title_bonus = 1 if smart_title(edition.title or "") == clean_title_for_matching(edition.title or "") else 0
+        local_kind = classify_local_file_kind(file_work, record, record.file_format)
+        candidate_kind = classify_hardcover_edition(edition, book)
+        kind_ok = 1 if work_kind_penalty(local_kind, candidate_kind) == 0 else 0
         id_match = 1 if any(
             identifier
             and identifier in {clean_isbn(edition.isbn_10), clean_isbn(edition.isbn_13), clean_isbn(edition.asin)}
@@ -441,6 +428,7 @@ def rank_candidate_editions(
         no_marketing = 1 if title_marketing_penalty(" ".join([edition.title or "", edition.subtitle or ""]).strip()) == 0 else 0
         rank = (
             id_match,
+            kind_ok,
             clean_title_match,
             author_match,
             ebook_pref,
@@ -498,7 +486,7 @@ def rank_candidate_editions(
             clean_title_bonus=clean_title_bonus,
         )
         item = (rank, review_score, reason, edition)
-        if non_audio and type_rank > 0 and language_ok:
+        if kind_ok and non_audio and type_rank > 0 and language_ok:
             ranked.append(item)
         else:
             fallback.append(item)

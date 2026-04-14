@@ -16,7 +16,7 @@ from urllib import error as urllib_error, request as urllib_request
 
 from .audit_reporting import preview_names
 from .identifiers import clean_isbn
-from .models import HardcoverBook, HardcoverEdition
+from .models import HardcoverBook, HardcoverContribution, HardcoverEdition, HardcoverSeriesMembership
 from .runtime_defaults import (
     DEFAULT_CACHE_TTL_HOURS,
     DEFAULT_EDITION_CACHE_TTL_HOURS,
@@ -32,6 +32,7 @@ from .text_normalization import (
     normalize_person_name,
     smart_title,
 )
+from .work_classification import classify_hardcover_book, classify_hardcover_edition
 
 GRAPHQL_ENDPOINT = "https://api.hardcover.app/v1/graphql"
 QUIET_HC_LABELS = {
@@ -61,6 +62,85 @@ def chunked(sequence: List[Any], size: int) -> List[List[Any]]:
     if size <= 0:
         return [sequence[:]]
     return [sequence[index : index + size] for index in range(0, len(sequence), size)]
+
+
+
+def _contributions_from_nodes(nodes: List[Dict[str, Any]]) -> List[HardcoverContribution]:
+    output: List[HardcoverContribution] = []
+    seen: Set[Tuple[str, str]] = set()
+    for node in nodes or []:
+        author_node = (node.get("author") or {}) if isinstance(node, dict) else {}
+        author_name = normalize_person_name(str((author_node or {}).get("name") or "").strip())
+        if not author_name:
+            continue
+        contribution = str(node.get("contribution") or "").strip() if isinstance(node, dict) else ""
+        key = (normalize_author_key(author_name), contribution.strip().lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(
+            HardcoverContribution(
+                author_name=author_name,
+                contribution=contribution,
+                normalized_role=contribution.strip().lower(),
+                is_primary=is_primary_author_contribution(contribution),
+            )
+        )
+    return output
+
+
+def _contribution_names(contributions: List[HardcoverContribution], predicate: Optional[str] = None) -> List[str]:
+    output: List[str] = []
+    seen: Set[str] = set()
+    for contribution in contributions or []:
+        role = contribution.normalized_role or ""
+        if predicate == "primary" and not contribution.is_primary:
+            continue
+        if predicate == "narrator" and "narrat" not in role and "reader" not in role and "read by" not in role and "perform" not in role:
+            continue
+        if predicate == "adapter" and "adapt" not in role and "script" not in role and "screenplay" not in role:
+            continue
+        if predicate == "illustrator" and not any(token in role for token in ("illustrat", "inker", "penc", "artist", "cover")):
+            continue
+        if predicate == "editor" and not any(token in role for token in ("edit", "annotat", "comment", "foreword", "afterword", "introduction")):
+            continue
+        if predicate == "translator" and "translat" not in role:
+            continue
+        normalized = normalize_author_key(contribution.author_name)
+        if normalized and normalized not in seen:
+            output.append(contribution.author_name)
+            seen.add(normalized)
+    return output
+
+
+def _series_memberships_from_nodes(nodes: List[Dict[str, Any]]) -> List[HardcoverSeriesMembership]:
+    memberships: List[HardcoverSeriesMembership] = []
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        series = node.get("series") or {}
+        position = node.get("position")
+        try:
+            position_value = float(position) if position is not None else None
+        except Exception:
+            position_value = None
+        memberships.append(
+            HardcoverSeriesMembership(
+                series_id=int(series.get("id") or 0),
+                series_name=smart_title(series.get("name") or ""),
+                series_slug=str(series.get("slug") or "").strip(),
+                position=position_value,
+                details=str(node.get("details") or ""),
+                featured=bool(node.get("featured")),
+                compilation=bool(node.get("compilation")),
+                raw_series_id=int(series.get("id") or 0),
+                raw_series_name=smart_title(series.get("name") or ""),
+                is_completed=series.get("is_completed"),
+                books_count=int(series.get("books_count") or 0) if series.get("books_count") not in (None, "") else None,
+                primary_books_count=int(series.get("primary_books_count") or 0) if series.get("primary_books_count") not in (None, "") else None,
+            )
+        )
+    return memberships
 
 
 @dataclass
@@ -1013,14 +1093,14 @@ class HardcoverClient:
         return output
 
     def _book_from_node(self, book_node: Dict[str, Any]) -> HardcoverBook:
+        contributions = _contributions_from_nodes(book_node.get("contributions") or [])
         authors = authors_from_contributions(book_node.get("contributions") or [])
+        series_memberships = _series_memberships_from_nodes(book_node.get("book_series") or [])
         series_parts = []
-        for series_membership in book_node.get("book_series") or []:
-            series_name = ((series_membership.get("series") or {}).get("name") or "").strip()
-            position = series_membership.get("position")
-            if series_name:
-                series_parts.append(f"{series_name} [{position}]" if position is not None else series_name)
-        return HardcoverBook(
+        for membership in series_memberships:
+            if membership.series_name:
+                series_parts.append(f"{membership.series_name} [{membership.position}]" if membership.position is not None else membership.series_name)
+        book = HardcoverBook(
             id=int(book_node["id"]),
             title=smart_title(book_node.get("title") or ""),
             subtitle=smart_title(book_node.get("subtitle") or ""),
@@ -1036,11 +1116,23 @@ class HardcoverClient:
             default_physical_edition_id=int(book_node.get("default_physical_edition_id") or 0),
             default_audio_edition_id=int(book_node.get("default_audio_edition_id") or 0),
             default_cover_edition_id=int(book_node.get("default_cover_edition_id") or 0),
+            contributions=contributions,
+            primary_authors=_contribution_names(contributions, "primary"),
+            secondary_contributors=_contribution_names(contributions),
+            narrators=_contribution_names(contributions, "narrator"),
+            adapters=_contribution_names(contributions, "adapter"),
+            illustrators=_contribution_names(contributions, "illustrator"),
+            editors=_contribution_names(contributions, "editor"),
+            translators=_contribution_names(contributions, "translator"),
+            series_memberships=series_memberships,
         )
+        book.work_kind = classify_hardcover_book(book, None)
+        return book
 
     def _edition_from_node(self, edition_node: Dict[str, Any], book_id: int) -> HardcoverEdition:
+        contributions = _contributions_from_nodes(edition_node.get("contributions") or [])
         authors = authors_from_contributions(edition_node.get("contributions") or [])
-        return HardcoverEdition(
+        edition = HardcoverEdition(
             id=int(edition_node.get("id")),
             book_id=book_id,
             title=smart_title(edition_node.get("title") or ""),
@@ -1055,16 +1147,22 @@ class HardcoverClient:
             isbn_10=clean_isbn(edition_node.get("isbn_10") or ""),
             isbn_13=clean_isbn(edition_node.get("isbn_13") or ""),
             asin=clean_isbn(edition_node.get("asin") or ""),
-            audio_seconds=(
-                int(edition_node.get("audio_seconds"))
-                if edition_node.get("audio_seconds") not in (None, "")
-                else None
-            ),
+            audio_seconds=(int(edition_node.get("audio_seconds")) if edition_node.get("audio_seconds") not in (None, "") else None),
             physical_format=(edition_node.get("physical_format") or ""),
             edition_format=(edition_node.get("edition_format") or ""),
             reading_format=((edition_node.get("reading_format") or {}).get("format") or ""),
             language=((edition_node.get("language") or {}).get("language") or ""),
+            contributions=contributions,
+            primary_authors=_contribution_names(contributions, "primary"),
+            secondary_contributors=_contribution_names(contributions),
+            narrators=_contribution_names(contributions, "narrator"),
+            adapters=_contribution_names(contributions, "adapter"),
+            illustrators=_contribution_names(contributions, "illustrator"),
+            editors=_contribution_names(contributions, "editor"),
+            translators=_contribution_names(contributions, "translator"),
         )
+        edition.work_kind = classify_hardcover_edition(edition, None)
+        return edition
 
     def fetch_book_by_id(self, book_id: int, force_refresh: bool = False) -> Optional[HardcoverBook]:
         cache_key = f"book_single_v5::{book_id}"
@@ -1085,7 +1183,7 @@ class HardcoverClient:
             default_audio_edition_id
             default_cover_edition_id
             contributions { contribution author { name } }
-            book_series { position series { name } }
+            book_series { position series { id name slug } }
           }
         }
         """
@@ -1117,7 +1215,7 @@ class HardcoverClient:
             default_audio_edition_id
             default_cover_edition_id
             contributions { contribution author { name } }
-            book_series { position series { name } }
+            book_series { position series { id name slug } }
           }
         }
         """
@@ -1160,7 +1258,7 @@ class HardcoverClient:
             default_audio_edition_id
             default_cover_edition_id
             contributions { contribution author { name } }
-            book_series { position series { name } }
+            book_series { position series { id name slug } }
             editions {
               id
               title

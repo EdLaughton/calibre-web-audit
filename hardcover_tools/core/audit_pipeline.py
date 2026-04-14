@@ -78,6 +78,13 @@ from .text_normalization import (
     strip_series_suffix,
     title_query_variants,
 )
+from .work_matching import (
+    candidate_author_string,
+    is_strong_work_match,
+    is_tolerable_work_match,
+    score_work_candidate,
+    title_normalization_candidate,
+)
 
 
 def vlog(verbose: bool, message: str) -> None:
@@ -282,11 +289,7 @@ def _hardcover_candidate_authors(
     book: Optional[HardcoverBook],
     edition: Optional[HardcoverEdition],
 ) -> str:
-    if edition and getattr(edition, "authors", None) and not is_audio_edition(edition):
-        return edition.authors
-    if book and getattr(book, "authors", None):
-        return book.authors
-    return ""
+    return candidate_author_string(book, edition)
 
 
 def _preferred_metadata_authors(
@@ -306,52 +309,21 @@ def _preferred_metadata_authors(
         or ""
     )
 
-SUSPECT_NON_PROSE_PATTERNS = re.compile(
-    r"(graphic\s+novel|graphic|comic(?:s)?|manga|adaptation|adapted|illustrated|companion|guide|screenplay|script|annotated)",
-    re.I,
-)
-
-
-def _candidate_text_blob(book: Optional[HardcoverBook], edition: Optional[HardcoverEdition]) -> str:
-    parts = []
-    if edition:
-        parts.extend([smart_title(edition.title or ""), smart_title(getattr(edition, "subtitle", "") or "")])
-    if book:
-        parts.append(smart_title(book.title or ""))
-    return " ".join(part for part in parts if part).strip()
-
-
-def _file_looks_non_prose(file_work: FileWork, record: Optional[BookRecord] = None) -> bool:
-    raw = smart_title(file_work.title or (record.calibre_title if record else ""))
-    if not raw:
-        return False
-    return bool(SUSPECT_NON_PROSE_PATTERNS.search(raw))
-
-
 def _candidate_looks_non_prose_or_adaptation(
     book: Optional[HardcoverBook],
     edition: Optional[HardcoverEdition],
     file_work: FileWork,
     record: Optional[BookRecord] = None,
 ) -> bool:
-    raw = _candidate_text_blob(book, edition)
-    if not raw:
-        return False
-    if not SUSPECT_NON_PROSE_PATTERNS.search(raw):
-        return False
-    return not _file_looks_non_prose(file_work, record)
+    from .work_classification import classify_hardcover_book, classify_local_file_kind, work_kind_penalty
+
+    local_kind = classify_local_file_kind(file_work, record, getattr(record, "file_format", "") if record else "")
+    candidate_kind = classify_hardcover_book(book, edition)
+    return work_kind_penalty(local_kind, candidate_kind) >= 50.0
 
 
 def _title_normalization_candidate(calibre_title: str, canonical_title: str) -> bool:
-    raw_calibre = smart_title(calibre_title)
-    raw_canonical = smart_title(canonical_title)
-    cleaned_calibre = clean_title_for_matching(raw_calibre)
-    cleaned_canonical = clean_title_for_matching(raw_canonical)
-    if not raw_calibre or not raw_canonical or not cleaned_calibre or not cleaned_canonical:
-        return False
-    if cleaned_calibre != cleaned_canonical:
-        return False
-    return raw_calibre != raw_canonical
+    return title_normalization_candidate(calibre_title, canonical_title)
 
 
 def _is_strong_metadata_trust(
@@ -364,19 +336,15 @@ def _is_strong_metadata_trust(
     file_work: FileWork,
     record: BookRecord,
 ) -> bool:
-    if not book:
-        return False
-    if _candidate_looks_non_prose_or_adaptation(book, edition, file_work, record):
-        return False
-    if score < 85.0:
-        return False
-    if breakdown.author_score < 0.90:
-        return False
-    if breakdown.title_score >= 0.95:
-        return True
-    if breakdown.title_score >= 0.90 and "close-title" in why:
-        return True
-    return False
+    return is_strong_work_match(
+        score=score,
+        breakdown=breakdown,
+        why=why,
+        book=book,
+        edition=edition,
+        file_work=file_work,
+        record=record,
+    )
 
 
 def _is_tolerable_current_match(
@@ -389,19 +357,15 @@ def _is_tolerable_current_match(
     file_work: FileWork,
     record: BookRecord,
 ) -> bool:
-    if not book:
-        return False
-    if _candidate_looks_non_prose_or_adaptation(book, edition, file_work, record):
-        return False
-    if score < 78.0:
-        return False
-    if breakdown.title_score >= 0.85 and breakdown.author_score >= 0.85:
-        return True
-    if breakdown.title_score >= 0.70 and breakdown.author_score >= 0.95:
-        return True
-    if _title_normalization_candidate(record.calibre_title, book.title) and breakdown.author_score >= 0.95:
-        return True
-    return False
+    return is_tolerable_work_match(
+        score=score,
+        breakdown=breakdown,
+        why=why,
+        book=book,
+        edition=edition,
+        file_work=file_work,
+        record=record,
+    )
 
 
 def score_candidate_against_file(
@@ -410,85 +374,7 @@ def score_candidate_against_file(
     hardcover_book: HardcoverBook,
     preferred_edition: Optional[HardcoverEdition] = None,
 ) -> Tuple[float, MatchScores, str]:
-    title_score = (
-        max(
-            bare_title_similarity(file_work.title, hardcover_book.title),
-            bare_title_similarity(strip_series_suffix(file_work.title), hardcover_book.title),
-        )
-        if file_work.title
-        else 0.0
-    )
-    if title_score == 0 and record.calibre_title:
-        title_score = bare_title_similarity(record.calibre_title, hardcover_book.title) * 0.7
-
-    candidate_authors = effective_candidate_authors(hardcover_book, preferred_edition)
-    effective_file_authors = file_work.authors or record.calibre_authors
-    author_score = 0.0
-    if file_work.authors:
-        full_author = author_coverage(file_work.authors, candidate_authors)
-        primary = author_coverage(primary_author(file_work.authors), candidate_authors)
-        if file_work.authors_basis == "calibre_fallback":
-            author_score = max(full_author, primary * 0.95)
-        else:
-            author_score = max(full_author, primary * 0.85)
-    if author_score == 0 and record.calibre_authors:
-        author_score = author_coverage(record.calibre_authors, candidate_authors) * 0.6
-
-    series_score = 10.0 if (
-        record.calibre_series and hardcover_book.series and norm(record.calibre_series) in norm(hardcover_book.series)
-    ) else 0.0
-    total = title_score * 70 + author_score * 20 + series_score - title_marketing_penalty(hardcover_book.title)
-
-    candidate_contributors = contributor_count(candidate_authors)
-    file_contributors = contributor_count(effective_file_authors)
-    no_author_overlap = bool(effective_file_authors) and author_coverage(effective_file_authors, candidate_authors) == 0.0
-
-    if no_author_overlap:
-        total -= 25.0
-        if candidate_contributors >= max(3, file_contributors + 2):
-            total -= min(12.0, 2.5 * (candidate_contributors - max(1, file_contributors)))
-    elif effective_file_authors and candidate_contributors >= 3 and file_contributors <= 2 and author_score < 0.55:
-        total -= 8.0
-
-    if preferred_edition and is_audio_edition(preferred_edition) and author_score < 0.95:
-        total -= 12.0
-    if preferred_edition and is_blank_language_edition(preferred_edition):
-        total -= 2.5
-    if preferred_edition and hardcover_book.default_ebook_edition_id and int(preferred_edition.id) == int(
-        hardcover_book.default_ebook_edition_id
-    ):
-        total += 1.0
-
-    if _candidate_looks_non_prose_or_adaptation(hardcover_book, preferred_edition, file_work, record):
-        total -= 40.0
-    elif preferred_edition and is_collectionish_edition(preferred_edition):
-        total -= 18.0
-
-    total = round(total, 2)
-    reasons = []
-    if title_score >= 0.98:
-        reasons.append("exact-title")
-    elif title_score >= 0.90:
-        reasons.append("close-title")
-    elif title_score >= 0.75:
-        reasons.append("partial-title")
-    if author_score >= 0.99:
-        reasons.append("author")
-    elif author_score >= 0.50:
-        reasons.append("partial-author")
-    elif no_author_overlap and effective_file_authors:
-        reasons.append("author-mismatch")
-    if series_score:
-        reasons.append("series")
-    if preferred_edition and is_audio_edition(preferred_edition):
-        reasons.append("audio-edition")
-    if no_author_overlap and candidate_contributors >= max(3, file_contributors + 2):
-        reasons.append("multi-contributor-mismatch")
-    if title_marketing_penalty(hardcover_book.title):
-        reasons.append("marketing-title")
-    if _candidate_looks_non_prose_or_adaptation(hardcover_book, preferred_edition, file_work, record):
-        reasons.append("noncanonical-work")
-    return total, MatchScores(round(title_score, 3), round(author_score, 3), round(series_score, 3), total), ",".join(reasons)
+    return score_work_candidate(file_work, record, hardcover_book, preferred_edition)
 
 
 def fetch_current_book_resilient(hardcover_client: HardcoverClient, book_id: int) -> Optional[HardcoverBook]:
@@ -701,10 +587,20 @@ def decide_action(
     file_vs_current_auth = author_coverage(file_work.authors, current_candidate_authors) if (file_work.authors and current_candidate_authors) else 0.0
 
     current_breakdown = MatchScores(file_vs_current_title, file_vs_current_auth, 0.0, current_score)
+    if current_book:
+        _rescored_current_score, _rescored_current_breakdown, _rescored_current_why = score_candidate_against_file(
+            file_work,
+            record,
+            current_book,
+            current_edition,
+        )
+        current_breakdown = _rescored_current_breakdown
+    else:
+        _rescored_current_why = ""
     current_match = _is_strong_metadata_trust(
         score=current_score,
         breakdown=current_breakdown,
-        why="",
+        why=_rescored_current_why,
         book=current_book,
         edition=current_edition,
         file_work=file_work,
@@ -713,7 +609,7 @@ def decide_action(
     current_tolerated = _is_tolerable_current_match(
         score=current_score,
         breakdown=current_breakdown,
-        why="",
+        why=_rescored_current_why,
         book=current_book,
         edition=current_edition,
         file_work=file_work,
@@ -725,13 +621,26 @@ def decide_action(
     best_file_author_score = author_coverage(file_work.authors, best_candidate_authors) if (
         file_work.authors and best_candidate_authors
     ) else 0.0
-    best_match = bool(
-        best_book
-        and not _candidate_looks_non_prose_or_adaptation(best_book, best_edition, file_work, record)
-        and best_score >= 84.0
-        and best_file_title_score >= 0.90
-        and (not file_work.authors or best_file_author_score >= 0.90)
-    )
+    if best_book:
+        _rescored_best_score, _rescored_best_breakdown, _rescored_best_why = score_candidate_against_file(
+            file_work,
+            record,
+            best_book,
+            best_edition,
+        )
+        best_file_title_score = max(best_file_title_score, _rescored_best_breakdown.title_score)
+        best_file_author_score = max(best_file_author_score, _rescored_best_breakdown.author_score)
+        best_match = is_strong_work_match(
+            score=best_score,
+            breakdown=_rescored_best_breakdown,
+            why=_rescored_best_why,
+            book=best_book,
+            edition=best_edition,
+            file_work=file_work,
+            record=record,
+        )
+    else:
+        best_match = False
 
     cleaned_calibre = clean_title_for_matching(record.calibre_title)
     file_conflicts_with_calibre = (
