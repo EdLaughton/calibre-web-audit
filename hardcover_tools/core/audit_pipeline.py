@@ -78,6 +78,13 @@ from .text_normalization import (
     strip_series_suffix,
     title_query_variants,
 )
+from .work_matching import (
+    candidate_author_string,
+    is_strong_work_match,
+    is_tolerable_work_match,
+    score_work_candidate,
+    title_normalization_candidate,
+)
 
 
 def vlog(verbose: bool, message: str) -> None:
@@ -228,34 +235,72 @@ def is_searchworthy_token(query: str, current_hardcover_id: str = "") -> bool:
     return True
 
 
-def _is_ignorable_title_query_candidate(candidate: str) -> bool:
-    candidate = norm(candidate or "")
-    if not candidate:
+
+
+BACKMATTER_TITLE_RE = re.compile(
+    r"^(?:about the author|about the authors|acknowledg(?:e)?ments?|contents|table of contents|copyright|also by|title page|dedication)$",
+    re.I,
+)
+
+
+def _normalize_query_title(value: str) -> str:
+    value = html.unescape(smart_title(value or ""))
+    value = re.sub(r"\s+", " ", value).strip(" -:;,.[]")
+    return value
+
+
+def _is_junk_query_title(value: str) -> bool:
+    value = _normalize_query_title(value)
+    if not value:
         return True
-    generic_patterns = [
-        r"^about the author$",
-        r"^about the authors$",
-        r"^about the writers?$",
-        r"^about the editor$",
-        r"^acknowledg(?:e)?ments?$",
-        r"^copyright$",
-        r"^title page$",
-        r"^table of contents$",
-        r"^contents$",
-        r"^also by .+$",
-    ]
-    return any(re.fullmatch(pattern, candidate) for pattern in generic_patterns)
+    if BACKMATTER_TITLE_RE.fullmatch(value):
+        return True
+    return False
 
 
-def _content_title_candidate_is_plausible(raw_candidate: str, *, trusted_titles: List[str]) -> bool:
-    candidate = smart_title(raw_candidate or "")
-    if not candidate or _is_ignorable_title_query_candidate(candidate):
+def _query_title_variants(raw: str) -> List[str]:
+    variants: List[str] = []
+    for candidate in title_query_variants(raw or ""):
+        normalized = _normalize_query_title(candidate)
+        cleaned = _normalize_query_title(clean_title_for_matching(normalized))
+        for value in (cleaned, normalized):
+            if not value or _is_junk_query_title(value):
+                continue
+            if value not in variants:
+                variants.append(value)
+    return variants
+
+
+def _same_work_cleanup_candidate(calibre_title: str, canonical_title: str, *, file_title: str = "") -> bool:
+    if _title_normalization_candidate(calibre_title, canonical_title):
+        return True
+    cleaned_calibre = _normalize_query_title(clean_title_for_matching(calibre_title))
+    cleaned_canonical = _normalize_query_title(clean_title_for_matching(canonical_title))
+    if cleaned_calibre and cleaned_canonical and cleaned_calibre == cleaned_canonical:
+        if _normalize_query_title(calibre_title) != cleaned_canonical:
+            return True
+    if file_title:
+        cleaned_file = _normalize_query_title(clean_title_for_matching(file_title))
+        if cleaned_file and cleaned_canonical and cleaned_file == cleaned_canonical:
+            if _normalize_query_title(calibre_title) != cleaned_canonical:
+                return True
+    return False
+
+
+def _looks_wrapper_title(title: str) -> bool:
+    raw = _normalize_query_title(title)
+    if not raw:
         return False
-    trusted = [smart_title(value or "") for value in trusted_titles if value]
-    if not trusted:
+    cleaned = _normalize_query_title(clean_title_for_matching(raw))
+    if title_marketing_penalty(raw) > 0:
         return True
-    return max((bare_title_similarity(candidate, value) for value in trusted), default=0.0) >= 0.72
-
+    if cleaned and cleaned != raw:
+        return True
+    if re.search(r"#\s*\d+", raw):
+        return True
+    if re.search(r"\b(?:book|volume|vol\.?|series|novel|chronicle|chronicles|saga|files?|mystery|mysteries)\b", raw, re.I):
+        return True
+    return False
 
 def build_search_queries(
     record: BookRecord,
@@ -275,26 +320,19 @@ def build_search_queries(
         if cleaned:
             exact_tokens.append(cleaned)
 
-    trusted_titles = [file_work.title, embedded.embedded_title, record.calibre_title]
-    raw_title_inputs: List[str] = []
-    for raw in trusted_titles:
-        if raw:
-            raw_title_inputs.append(raw)
-    if content.inferred_title_from_content and _content_title_candidate_is_plausible(
-        content.inferred_title_from_content,
-        trusted_titles=trusted_titles,
-    ):
-        raw_title_inputs.append(content.inferred_title_from_content)
-
     title_candidates: List[str] = []
-    for raw in raw_title_inputs:
-        for candidate in title_query_variants(raw or ""):
-            candidate = smart_title(candidate)
-            candidate = html.unescape(candidate)
-            candidate = clean_title_for_matching(candidate)
-            candidate = re.sub(r"\s+", " ", candidate).strip()
-            if not candidate or _is_ignorable_title_query_candidate(candidate):
-                continue
+    trusted_titles: List[str] = []
+    for raw in [file_work.title, embedded.embedded_title, record.calibre_title]:
+        for candidate in _query_title_variants(raw or ""):
+            if candidate not in trusted_titles:
+                trusted_titles.append(candidate)
+            if candidate not in title_candidates:
+                title_candidates.append(candidate)
+
+    for candidate in _query_title_variants(content.inferred_title_from_content or ""):
+        if not trusted_titles:
+            break
+        if max(bare_title_similarity(candidate, trusted) for trusted in trusted_titles) >= 0.85:
             if candidate not in title_candidates:
                 title_candidates.append(candidate)
 
@@ -319,7 +357,6 @@ def build_search_queries(
             output.append(query)
             seen.add(query)
     return output
-
 
 
 def _hardcover_candidate_authors(
@@ -351,84 +388,59 @@ def _preferred_metadata_authors(
     )
 
 
+def _title_normalization_candidate(calibre_title: str, canonical_title: str) -> bool:
+    return title_normalization_candidate(calibre_title, canonical_title)
+
+
+def _is_strong_metadata_trust(
+    *,
+    score: float,
+    breakdown: MatchScores,
+    why: str,
+    book: Optional[HardcoverBook],
+    edition: Optional[HardcoverEdition],
+    file_work: FileWork,
+    record: BookRecord,
+) -> bool:
+    return is_strong_work_match(
+        score=score,
+        breakdown=breakdown,
+        why=why,
+        book=book,
+        edition=edition,
+        file_work=file_work,
+        record=record,
+    )
+
+
+def _is_tolerable_current_match(
+    *,
+    score: float,
+    breakdown: MatchScores,
+    why: str,
+    book: Optional[HardcoverBook],
+    edition: Optional[HardcoverEdition],
+    file_work: FileWork,
+    record: BookRecord,
+) -> bool:
+    return is_tolerable_work_match(
+        score=score,
+        breakdown=breakdown,
+        why=why,
+        book=book,
+        edition=edition,
+        file_work=file_work,
+        record=record,
+    )
+
+
 def score_candidate_against_file(
     file_work: FileWork,
     record: BookRecord,
     hardcover_book: HardcoverBook,
     preferred_edition: Optional[HardcoverEdition] = None,
 ) -> Tuple[float, MatchScores, str]:
-    title_score = (
-        max(
-            bare_title_similarity(file_work.title, hardcover_book.title),
-            bare_title_similarity(strip_series_suffix(file_work.title), hardcover_book.title),
-        )
-        if file_work.title
-        else 0.0
-    )
-    if title_score == 0 and record.calibre_title:
-        title_score = bare_title_similarity(record.calibre_title, hardcover_book.title) * 0.7
-
-    candidate_authors = effective_candidate_authors(hardcover_book, preferred_edition)
-    effective_file_authors = file_work.authors or record.calibre_authors
-    author_score = 0.0
-    if file_work.authors:
-        full_author = author_coverage(file_work.authors, candidate_authors)
-        primary = author_coverage(primary_author(file_work.authors), candidate_authors)
-        if file_work.authors_basis == "calibre_fallback":
-            author_score = max(full_author, primary * 0.95)
-        else:
-            author_score = max(full_author, primary * 0.85)
-    if author_score == 0 and record.calibre_authors:
-        author_score = author_coverage(record.calibre_authors, candidate_authors) * 0.6
-
-    series_score = 10.0 if (
-        record.calibre_series and hardcover_book.series and norm(record.calibre_series) in norm(hardcover_book.series)
-    ) else 0.0
-    total = title_score * 70 + author_score * 20 + series_score - title_marketing_penalty(hardcover_book.title)
-
-    candidate_contributors = contributor_count(candidate_authors)
-    file_contributors = contributor_count(effective_file_authors)
-    no_author_overlap = bool(effective_file_authors) and author_coverage(effective_file_authors, candidate_authors) == 0.0
-
-    if no_author_overlap:
-        total -= 25.0
-        if candidate_contributors >= max(3, file_contributors + 2):
-            total -= min(12.0, 2.5 * (candidate_contributors - max(1, file_contributors)))
-    elif effective_file_authors and candidate_contributors >= 3 and file_contributors <= 2 and author_score < 0.55:
-        total -= 8.0
-
-    if preferred_edition and is_audio_edition(preferred_edition) and author_score < 0.95:
-        total -= 12.0
-    if preferred_edition and is_blank_language_edition(preferred_edition):
-        total -= 2.5
-    if preferred_edition and hardcover_book.default_ebook_edition_id and int(preferred_edition.id) == int(
-        hardcover_book.default_ebook_edition_id
-    ):
-        total += 1.0
-
-    total = round(total, 2)
-    reasons = []
-    if title_score >= 0.98:
-        reasons.append("exact-title")
-    elif title_score >= 0.90:
-        reasons.append("close-title")
-    elif title_score >= 0.75:
-        reasons.append("partial-title")
-    if author_score >= 0.99:
-        reasons.append("author")
-    elif author_score >= 0.50:
-        reasons.append("partial-author")
-    elif no_author_overlap and effective_file_authors:
-        reasons.append("author-mismatch")
-    if series_score:
-        reasons.append("series")
-    if preferred_edition and is_audio_edition(preferred_edition):
-        reasons.append("audio-edition")
-    if no_author_overlap and candidate_contributors >= max(3, file_contributors + 2):
-        reasons.append("multi-contributor-mismatch")
-    if title_marketing_penalty(hardcover_book.title):
-        reasons.append("marketing-title")
-    return total, MatchScores(round(title_score, 3), round(author_score, 3), round(series_score, 3), total), ",".join(reasons)
+    return score_work_candidate(file_work, record, hardcover_book, preferred_edition)
 
 
 def fetch_current_book_resilient(hardcover_client: HardcoverClient, book_id: int) -> Optional[HardcoverBook]:
@@ -473,7 +485,15 @@ def validate_current_hardcover_link(
         current_edition = current_choice.chosen
         current_score, current_breakdown, why = score_candidate_against_file(file_work, record, current_book, current_edition)
         current_score = book_selection_adjusted_score(current_score, file_work, current_book, current_edition)
-        current_ok = current_score >= 75
+        current_ok = _is_strong_metadata_trust(
+            score=current_score,
+            breakdown=current_breakdown,
+            why=why or "",
+            book=current_book,
+            edition=current_edition,
+            file_work=file_work,
+            record=record,
+        )
         preferred_summary = compact_edition_marker(current_edition, current_choice.chosen_score) if current_edition else "-"
         vlog(
             verbose,
@@ -604,6 +624,8 @@ def should_search_after_current_validation(
     cleaned_title = clean_title_for_matching(raw_title)
     looks_marketing = title_marketing_penalty(raw_title) > 0
     looks_collection = bool(re.search(r"\b(collection|boxed set|books? set|series by|must-read)\b", raw_title, re.I))
+    if _same_work_cleanup_candidate(record.calibre_title, current_book.title):
+        return True, "current link is plausible but decorated title should be checked against a cleaner canonical alternative"
     if looks_marketing or looks_collection or cleaned_title != raw_title:
         return True, "current link is plausible but checking for cleaner alternative"
     return False, "direct current-id validation succeeded"
@@ -627,7 +649,21 @@ def decide_action(
     current_candidate_authors = _hardcover_candidate_authors(current_book, current_edition)
     file_vs_current_auth = author_coverage(file_work.authors, current_candidate_authors) if (file_work.authors and current_candidate_authors) else 0.0
 
-    current_match = current_book is not None and current_score >= 75
+    current_breakdown = MatchScores(
+        bare_title_similarity(file_work.title, current_book.title) if (file_work.title and current_book) else 0.0,
+        author_coverage(file_work.authors, current_candidate_authors) if (file_work.authors and current_candidate_authors) else 0.0,
+        10.0 if (record.calibre_series and current_book and current_book.series and norm(record.calibre_series) in norm(current_book.series)) else 0.0,
+        current_score,
+    )
+    current_match = _is_tolerable_current_match(
+        score=current_score,
+        breakdown=current_breakdown,
+        why=(('exact-title,' if current_breakdown.title_score >= 0.98 else 'partial-title,' if current_breakdown.title_score >= 0.75 else '') + ('author,' if current_breakdown.author_score >= 0.99 else 'partial-author,' if current_breakdown.author_score >= 0.50 else '') + ('series' if current_breakdown.series_score else '')).strip(','),
+        book=current_book,
+        edition=current_edition,
+        file_work=file_work,
+        record=record,
+    ) if current_book else False
     best_match = best_book is not None and best_score >= 80
 
     cleaned_calibre = clean_title_for_matching(record.calibre_title)
@@ -644,6 +680,27 @@ def decide_action(
         file_work.authors and best_candidate_authors
     ) else 0.0
 
+    current_hardcover_id = extract_numeric_id(record.calibre_hardcover_id)
+    best_hardcover_id = str(best_book.id) if best_book else ""
+    same_current_and_best_id = bool(current_hardcover_id and best_hardcover_id and current_hardcover_id == best_hardcover_id)
+
+    current_decorated = bool(current_book and _same_work_cleanup_candidate(record.calibre_title, current_book.title, file_title=file_work.title))
+    best_decorated = bool(best_book and _same_work_cleanup_candidate(record.calibre_title, best_book.title, file_title=file_work.title))
+    current_wrapperish = bool(current_book and _looks_wrapper_title(current_book.title))
+    best_wrapperish = bool(best_book and _looks_wrapper_title(best_book.title))
+    if current_decorated and file_work.title and file_vs_current_title < 0.90:
+        current_match = False
+    if current_decorated and current_score < 90 and file_vs_current_auth < 0.95:
+        current_match = False
+    if current_wrapperish and current_breakdown.title_score < 0.95:
+        current_match = False
+    if current_wrapperish and current_score < 92 and current_breakdown.title_score < 0.98:
+        current_match = False
+    if best_wrapperish and same_current_and_best_id and best_file_title_score < 0.95:
+        best_match = False
+    if best_decorated and best_file_title_score >= 0.90 and best_file_author_score >= 0.85:
+        best_match = True
+
     current_clean = clean_title_for_matching(current_book.title) if current_book else ""
     best_clean = clean_title_for_matching(best_book.title) if best_book else ""
     best_cleaner_same_work = bool(
@@ -655,13 +712,9 @@ def decide_action(
         and best_score >= current_score - 4
     )
 
-    current_hardcover_id = extract_numeric_id(record.calibre_hardcover_id)
-    best_hardcover_id = str(best_book.id) if best_book else ""
-    same_current_and_best_id = bool(current_hardcover_id and best_hardcover_id and current_hardcover_id == best_hardcover_id)
-
-    if best_book and best_match and same_current_and_best_id and record.calibre_hardcover_id and not current_match:
+    if best_book and best_match and same_current_and_best_id and record.calibre_hardcover_id and (not current_match or best_decorated):
         same_id_edition = current_edition or best_edition
-        if title_needs_cleanup and bare_title_similarity(cleaned_calibre, best_book.title) >= 0.92:
+        if _same_work_cleanup_candidate(record.calibre_title, best_book.title, file_title=file_work.title):
             return Decision(
                 action="safe_auto_fix",
                 confidence_score=max(best_score, 90.0),
@@ -682,7 +735,7 @@ def decide_action(
                 **edition_decision_payload(same_id_edition),
                 fix_basis="same_hc_id_title_cleanup",
             )
-        if file_work.title and bare_title_similarity(file_work.title, best_book.title) >= 0.90 and file_vs_calibre_title < 0.70:
+        if file_work.title and best_file_title_score >= 0.95 and file_vs_calibre_title < 0.70 and not best_decorated and current_match:
             return Decision(
                 action="update_calibre_metadata",
                 confidence_score=max(best_score, 85.0),
@@ -703,7 +756,7 @@ def decide_action(
                 **edition_decision_payload(same_id_edition),
                 fix_basis="same_hc_id_title_update",
             )
-        if file_work.authors and author_coverage(file_work.authors, best_book.authors) >= 0.95 and file_vs_calibre_auth < 0.70:
+        if file_work.authors and author_coverage(file_work.authors, best_book.authors) >= 0.95 and file_vs_calibre_auth < 0.70 and current_match:
             return Decision(
                 action="update_calibre_metadata",
                 confidence_score=max(best_score, 85.0),
@@ -725,25 +778,34 @@ def decide_action(
                 fix_basis="same_hc_id_author_update",
             )
         return Decision(
-            action="keep_hardcover_id",
+            action="manual_review",
             confidence_score=max(best_score, 80.0),
             confidence_tier=confidence_tier(max(best_score, 80.0)),
-            reason="Current Hardcover ID was re-confirmed by search against the actual ebook file",
-            issue_category="verified",
+            reason="Current Hardcover link could not be confirmed confidently",
+            issue_category="verified_weak",
+            suggested_calibre_title=clean_title_for_matching(best_book.title),
+            suggested_calibre_authors=_preferred_metadata_authors(
+                current_book,
+                current_edition,
+                secondary_book=best_book,
+                secondary_edition=best_edition,
+                file_authors=file_work.authors,
+                fallback_authors=record.calibre_authors,
+            ),
             suggested_hardcover_id=record.calibre_hardcover_id,
             suggested_hardcover_slug=best_book.slug,
             **edition_decision_payload(same_id_edition),
-            fix_basis="current_hc_verified_by_search",
+            fix_basis="current_hc_not_confirmed_no_keep",
         )
 
     if best_book and best_match and ((not current_book) or best_book.id != current_book.id) and (
-        best_score >= current_score + 5 or best_cleaner_same_work
+        best_score >= current_score + 5 or best_cleaner_same_work or best_decorated or not current_match
     ):
         relink_block_reason = ""
         if record.calibre_hardcover_id:
-            if best_file_title_score < 0.90:
+            if best_file_title_score < 0.85 and not best_decorated:
                 relink_block_reason = "relink:block_title_not_close_enough"
-            elif file_work.authors and best_file_author_score < 0.95:
+            elif file_work.authors and best_file_author_score < 0.85 and not best_decorated:
                 relink_block_reason = "relink:block_primary_author_not_strong_enough"
             elif record.calibre_series and best_book.series and norm(record.calibre_series) not in norm(best_book.series):
                 relink_block_reason = "relink:block_series_conflict"
@@ -783,7 +845,7 @@ def decide_action(
         )
 
     if current_book and current_match:
-        if title_needs_cleanup and bare_title_similarity(cleaned_calibre, current_book.title) >= 0.92:
+        if _same_work_cleanup_candidate(record.calibre_title, current_book.title, file_title=file_work.title):
             return Decision(
                 action="safe_auto_fix",
                 confidence_score=max(current_score, 90.0),
@@ -804,7 +866,7 @@ def decide_action(
                 **edition_decision_payload(current_edition),
                 fix_basis="bare_title_policy",
             )
-        if file_work.title and file_vs_current_title >= 0.90 and file_vs_calibre_title < 0.70:
+        if file_work.title and file_vs_current_title >= 0.95 and file_vs_calibre_title < 0.70 and not current_decorated:
             return Decision(
                 action="update_calibre_metadata",
                 confidence_score=max(current_score, 85.0),
@@ -867,6 +929,27 @@ def decide_action(
                 **edition_decision_payload(current_edition),
                 fix_basis="file_first_current_hc_ok",
             )
+        if not current_match:
+            return Decision(
+                action="manual_review",
+                confidence_score=max(current_score, 80.0),
+                confidence_tier=confidence_tier(max(current_score, 80.0)),
+                reason="Current Hardcover link could not be confirmed confidently",
+                issue_category="verified_weak",
+                suggested_calibre_title=clean_title_for_matching(current_book.title),
+                suggested_calibre_authors=_preferred_metadata_authors(
+                    current_book,
+                    current_edition,
+                    secondary_book=best_book,
+                    secondary_edition=best_edition,
+                    file_authors=file_work.authors,
+                    fallback_authors=record.calibre_authors,
+                ),
+                suggested_hardcover_id=record.calibre_hardcover_id,
+                suggested_hardcover_slug=current_book.slug,
+                **edition_decision_payload(current_edition),
+                fix_basis="current_hc_not_confirmed_no_keep",
+            )
         return Decision(
             action="keep_hardcover_id",
             confidence_score=max(current_score, 80.0),
@@ -882,28 +965,7 @@ def decide_action(
     if best_book and best_match:
         action = "replace_hardcover_id" if record.calibre_hardcover_id else "set_hardcover_id"
         if same_current_and_best_id and action == "replace_hardcover_id":
-            if _title_normalization_candidate(record.calibre_title, best_book.title):
-                return Decision(
-                    action="safe_auto_fix",
-                    confidence_score=max(best_score, 82.0),
-                    confidence_tier=confidence_tier(max(best_score, 82.0)),
-                    reason="Current Hardcover work is already correct; normalize the calibre title only",
-                    issue_category="cleanup_only",
-                    suggested_calibre_title=clean_title_for_matching(best_book.title),
-                    suggested_calibre_authors=_preferred_metadata_authors(
-                        current_book,
-                        current_edition,
-                        secondary_book=best_book,
-                        secondary_edition=best_edition,
-                        file_authors=file_work.authors,
-                        fallback_authors=record.calibre_authors,
-                    ),
-                    suggested_hardcover_id=record.calibre_hardcover_id,
-                    suggested_hardcover_slug=best_book.slug,
-                    **edition_decision_payload(best_edition),
-                    fix_basis="same_hc_id_title_cleanup",
-                )
-            action = "manual_review"
+            action = "keep_hardcover_id"
         if action == "replace_hardcover_id" and (
             best_file_title_score < 0.90 or (file_work.authors and best_file_author_score < 0.95)
         ):
@@ -918,21 +980,23 @@ def decide_action(
                 else (
                     f"Actual ebook file matches Hardcover {best_book.id}"
                     if action == "set_hardcover_id"
-                    else "Current Hardcover link could not be confirmed confidently"
+                    else "Current Hardcover ID was re-confirmed by search against the actual ebook file"
                 )
             ),
             issue_category=(
                 "hardcover_link"
                 if action in {"replace_hardcover_id", "set_hardcover_id"}
-                else "manual_review"
+                else "verified" if action == "keep_hardcover_id" else "manual_review"
             ),
             suggested_calibre_title=clean_title_for_matching(best_book.title),
             suggested_calibre_authors=file_work.authors or best_book.authors,
-            suggested_hardcover_id=(record.calibre_hardcover_id if action != "replace_hardcover_id" else str(best_book.id)),
+            suggested_hardcover_id=(record.calibre_hardcover_id if action == "keep_hardcover_id" else str(best_book.id)),
             suggested_hardcover_slug=best_book.slug,
             **edition_decision_payload(best_edition),
             fix_basis=(
-                "file_best_match" if action in {"replace_hardcover_id", "set_hardcover_id"} else "same_hc_id_needs_review"
+                "current_hc_verified_by_search"
+                if action == "keep_hardcover_id"
+                else "file_best_match" if action in {"replace_hardcover_id", "set_hardcover_id"} else "relink_needs_review"
             ),
         )
 
