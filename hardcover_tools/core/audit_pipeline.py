@@ -127,6 +127,29 @@ def _best_title_similarity(source_title: str, candidate_title: str) -> float:
     return best
 
 
+def _cleanup_title_match(source_title: str, canonical_title: str) -> bool:
+    if _title_normalization_candidate(source_title, canonical_title):
+        return True
+    return _best_title_similarity(source_title, canonical_title) >= 0.98
+
+
+def _looks_wrapper_style_title(title: str) -> bool:
+    raw = smart_title(title)
+    if not raw:
+        return False
+    if title_marketing_penalty(raw) > 0:
+        return True
+    if re.search(r"(?:^|[\s:–—-])#\d+", raw):
+        return True
+    if re.search(
+        r"(?:book|volume|vol\.?|part|series)\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|[ivxlcdm]+)",
+        raw,
+        re.I,
+    ):
+        return True
+    return False
+
+
 def _is_interesting_verbose_row(
     decision: Decision,
     *,
@@ -658,7 +681,15 @@ def decide_action(
     current_candidate_authors = _hardcover_candidate_authors(current_book, current_edition)
     file_vs_current_auth = author_coverage(file_work.authors, current_candidate_authors) if (file_work.authors and current_candidate_authors) else 0.0
 
-    current_match = current_book is not None and current_score >= 75
+    current_decorated_title_match = bool(current_book and _cleanup_title_match(record.calibre_title, current_book.title))
+    current_wrapper_block = bool(
+        current_book
+        and _looks_wrapper_style_title(current_book.title)
+        and current_score < 95
+        and not current_decorated_title_match
+    )
+
+    current_match = current_book is not None and current_score >= 75 and not current_wrapper_block
     best_match = best_book is not None and best_score >= 80
 
     cleaned_calibre = clean_title_for_matching(record.calibre_title)
@@ -692,7 +723,7 @@ def decide_action(
 
     if best_book and best_match and same_current_and_best_id and record.calibre_hardcover_id and not current_match:
         same_id_edition = current_edition or best_edition
-        if title_needs_cleanup and bare_title_similarity(cleaned_calibre, best_book.title) >= 0.92:
+        if title_needs_cleanup and _cleanup_title_match(record.calibre_title, best_book.title):
             return Decision(
                 action="safe_auto_fix",
                 confidence_score=max(best_score, 90.0),
@@ -814,7 +845,7 @@ def decide_action(
         )
 
     if current_book and current_match:
-        if title_needs_cleanup and bare_title_similarity(cleaned_calibre, current_book.title) >= 0.92:
+        if title_needs_cleanup and _cleanup_title_match(record.calibre_title, current_book.title):
             return Decision(
                 action="safe_auto_fix",
                 confidence_score=max(current_score, 90.0),
@@ -913,7 +944,7 @@ def decide_action(
     if best_book and best_match:
         action = "replace_hardcover_id" if record.calibre_hardcover_id else "set_hardcover_id"
         if same_current_and_best_id and action == "replace_hardcover_id":
-            if _title_normalization_candidate(record.calibre_title, best_book.title):
+            if _cleanup_title_match(record.calibre_title, best_book.title):
                 return Decision(
                     action="safe_auto_fix",
                     confidence_score=max(best_score, 82.0),
